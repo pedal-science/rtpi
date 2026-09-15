@@ -111,11 +111,32 @@ else
   say "FAIL after ${DEADLINE_SEC}s — network=$ok_net sshd=$ok_ssh"
 fi
 say "diagnostics follow, then rebooting to the known-good slot"
+# Capture generously. This log is the ONLY evidence that will survive the reboot, and on a
+# candidate with no network there is no second chance to go and look. The first version of
+# this grepped dmesg for driver names and captured nothing at all -- which told us the
+# wifi was down and absolutely nothing about why.
 {
-  echo "--- ip addr ---";      ip -br addr 2>&1
-  echo "--- links ---";        ip -br link 2>&1
-  echo "--- listening ---";    ss -ltn 2>&1 | head -20
-  echo "--- net drivers ---";  dmesg 2>/dev/null | grep -iE 'rtw88|dwmac|stmmac|eth|wlan' | tail -30
+  echo "--- ip addr ---";       ip -br addr 2>&1
+  echo "--- links ---";         ip -br link 2>&1
+  echo "--- listening ---";     ss -ltn 2>&1 | head -20
+  echo "--- wifi phy ---";      ls -la /sys/class/ieee80211/ 2>&1
+  echo "--- mmc hosts ---";     for h in /sys/class/mmc_host/*; do
+                                  [ -e "$h" ] || continue
+                                  echo "$(basename "$h"): cards=$(ls -d "$h"/mmc* 2>/dev/null | tr '\n' ' ')"
+                                done
+  echo "--- rtw88 modules loaded ---"; lsmod 2>&1 | grep -iE 'rtw|mac80211|cfg80211' || echo "(none loaded)"
+  echo "--- modprobe rtw88_8723ds ---"; modprobe -v rtw88_8723ds 2>&1 | tail -10
+  echo "--- firmware present ---"; ls -la /lib/firmware/rtw88/ 2>&1 | head -10
+  echo "--- networkd ---";      journalctl -b -u systemd-networkd --no-pager 2>&1 | tail -20
+  echo "--- wpa_supplicant ---"; journalctl -b -u 'wpa_supplicant*' --no-pager 2>&1 | tail -20
+  # EARLY boot first. SDIO and network drivers probe in the first few seconds, so on a
+  # 300-second validation run "tail" captures the least interesting part of the log. The
+  # first version of this took tail -120 and recorded nothing about why the wifi was
+  # missing, which is the one question the log exists to answer.
+  echo "--- dmesg: EARLY boot (first 250 lines) ---"; dmesg 2>&1 | head -250
+  echo "--- dmesg: mmc/sdio/wifi lines, wherever they are ---"
+  dmesg 2>&1 | grep -inE 'mmc|sdio|rtw|wlan|pwrseq|dw_mmc|dwmmc' || echo "(no matching lines at all)"
+  echo "--- dmesg tail ---"; dmesg 2>&1 | tail -60
 } >> "$LOG" 2>&1
 sync
 
