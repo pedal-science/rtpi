@@ -93,6 +93,7 @@ setenv rtpi_krn "${prefix}zImage-good"
 setenv rtpi_ird "${prefix}uInitrd-good"
 setenv rtpi_dtb "${prefix}dtb-good"
 setenv rtpi_slot "known-good"
+setenv rtpi_slotarg "rtpi.slot=known-good"
 
 if test "${rt_try}" = "1"; then
 	echo "rtpi: one-shot candidate boot requested (rt_try=1)"
@@ -118,6 +119,7 @@ if test "${rt_try}" = "1"; then
 					setenv rtpi_ird "${prefix}uInitrd"
 					setenv rtpi_dtb "${prefix}dtb"
 					setenv rtpi_slot "CANDIDATE"
+					setenv rtpi_slotarg "rtpi.slot=candidate"
 				else
 					echo "rtpi: readback says rt_try=${rt_try}, expected 0 - booting known-good"
 				fi
@@ -151,7 +153,13 @@ fi
 # get PARTUUID of first partition on SD/eMMC the boot script was loaded from
 if test "${devtype}" = "mmc"; then part uuid mmc ${devnum}:1 partuuid; fi
 
-setenv bootargs "earlyprintk root=${rootdev} rootwait rootfstype=${rootfstype} ${consoleargs} consoleblank=0 loglevel=${verbosity} ubootpart=${partuuid} usb-storage.quirks=${usbstoragequirks} ${extraargs} ${extraboardargs}"
+# rtpi: ${rtpi_slotarg} appended. Without it there is no way to tell from userspace which
+# slot actually booted -- and while the two slots hold the same kernel version, as they do
+# immediately after freezing, uname cannot distinguish them at all. That ambiguity would
+# make every rehearsal inconclusive. The kernel ignores unrecognised dotted arguments and
+# passes them to init, so this is inert apart from appearing in /proc/cmdline, which is
+# exactly where we want to read it.
+setenv bootargs "earlyprintk root=${rootdev} rootwait rootfstype=${rootfstype} ${consoleargs} consoleblank=0 loglevel=${verbosity} ubootpart=${partuuid} usb-storage.quirks=${usbstoragequirks} ${rtpi_slotarg} ${extraargs} ${extraboardargs}"
 
 if test "${docker_optimizations}" = "on"; then setenv bootargs "${bootargs} cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory"; fi
 

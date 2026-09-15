@@ -35,6 +35,9 @@ load_device "$DEVICE"
 # normally use may be the one that broke -- which is exactly the case this tool exists to
 # detect. Reporting "never came back" when the board is up and reachable on its other
 # address would be the worst possible failure mode for this script.
+# probe echoes "<path> <kernel>" rather than setting a variable: it is called as
+# $(probe), which runs in a subshell, so any assignment inside it is discarded in the
+# parent. That is why the first version reported "answered on " with an empty path.
 LAST_PATH=""
 probe() {
   local h out
@@ -42,8 +45,7 @@ probe() {
     [[ -n $h ]] || continue
     out=$(ssh "${SSH_OPTS[@]}" -o ConnectTimeout=4 "$h" 'uname -r' 2>/dev/null) || continue
     [[ -n $out ]] || continue
-    LAST_PATH="$h"
-    printf '%s' "$out"
+    printf '%s %s' "$h" "$out"
     return 0
   done < <(ssh_hosts)
   return 1
@@ -69,7 +71,9 @@ ok "device went down after $(elapsed)s"
 last_seen=""
 stable_since=0
 while (( $(elapsed) < TIMEOUT )); do
-  if kernel=$(probe) && [[ -n $kernel ]]; then
+  if probe_out=$(probe) && [[ -n $probe_out ]]; then
+    LAST_PATH="${probe_out%% *}"
+    kernel="${probe_out#* }"
     now=$(date +%s)
     if [[ $kernel != "$last_seen" ]]; then
       log "up, running: $kernel (t+$(elapsed)s) — answered on $LAST_PATH"
@@ -89,7 +93,18 @@ while (( $(elapsed) < TIMEOUT )); do
       if [[ -z $EXPECT ]]; then
         echo "$kernel"; exit 0
       elif [[ $kernel == "$EXPECT" ]]; then
-        ok "this is the expected kernel — candidate booted successfully"
+        # Deliberately says only what is known. The kernel matching --expect does NOT by
+        # itself mean the candidate booted: while a freshly frozen fallback holds the same
+        # kernel version as the candidate, both slots report identical uname output. On tib
+        # the slot is readable from /proc/cmdline, so report that instead of inferring.
+        ok "kernel matches --expect"
+        SLOT=$(ssh "${SSH_OPTS[@]}" -o ConnectTimeout=6 "${LAST_PATH:-$SSH_HOST}" \
+               "grep -o 'rtpi.slot=[a-z-]*' /proc/cmdline 2>/dev/null" || true)
+        if [[ -n $SLOT ]]; then
+          ok "booted slot: ${SLOT#rtpi.slot=}"
+        else
+          warn "no rtpi.slot marker on the kernel cmdline — cannot tell which slot booted"
+        fi
         echo "$kernel"; exit 0
       else
         warn "came back on '$kernel', NOT the expected '$EXPECT'"
