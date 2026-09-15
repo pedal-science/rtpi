@@ -47,6 +47,20 @@ case "$state" in
   *)       die "unexpected candidate state: '$state'" ;;
 esac
 
+# piboot-try's state key is "<tryboot>/<old>/<current>/<new>", and EVERY case that
+# accepts a staged candidate is "[01]/-/good/unknown" — which requires old/ to be ABSENT.
+# flash-kernel guarantees that by doing `rm -rf old new` before it stages. If old/ is
+# present alongside an untested new/, the key becomes "X/good/good/unknown", no case
+# matches, and piboot-try aborts with "invalid or unexpected state" and will NOT tryboot.
+# Catch that here rather than discovering it at reboot time.
+if dev_ssh "sudo test -d $BOOT_MOUNT/$ROLLBACK_SLOT"; then
+  die "$ROLLBACK_SLOT/ exists alongside an untested $CANDIDATE_SLOT/.
+         piboot-try cannot handle that combination and will refuse to tryboot.
+         flash-kernel avoids it by removing $ROLLBACK_SLOT/ when it stages.
+         Fix:  ssh $SSH_HOST sudo rm -rf $BOOT_MOUNT/$ROLLBACK_SLOT"
+fi
+ok "$ROLLBACK_SLOT/ absent — state key will be a form piboot-try accepts"
+
 # Sanity: os_prefix is silently IGNORED unless BOTH the kernel and at least one .dtb
 # exist under the prefix. A candidate missing either would boot the WRONG slot without
 # any error, which would look like a pass.

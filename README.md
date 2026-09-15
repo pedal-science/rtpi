@@ -78,6 +78,33 @@ staged, your candidate is silently replaced mid-test.
 
 `make hold-piv` holds the kernel *and* the initramfs generators. `make unhold-piv` undoes it.
 
+### …but that `rm -rf old new` is also load-bearing, not just destructive
+
+Every state-machine case in `piboot-try` that accepts a staged candidate is
+`[01]/-/good/unknown` — the `-` means **`old/` must be absent**. flash-kernel guarantees
+that by removing `old/` before it stages. Leave `old/` in place next to an untested
+`new/` and the key becomes `1/good/good/unknown`, which no case matches; piboot-try
+aborts with *"piboot is in an invalid or unexpected state"* and silently refuses to
+tryboot.
+
+So anything that hand-stages a candidate (the rehearsals do) must remove `old/` too.
+`arm-try-piv.sh` refuses to arm if `old/` is present, because the failure otherwise only
+shows up at reboot time.
+
+### Verified, not assumed
+
+Both rehearsals have been run on the real hardware:
+
+| rehearsal | result |
+|---|---|
+| success | `new/` promoted to `current/`, `current/` demoted to `old/`, settled in 146s |
+| failure | board rebooted **itself** and returned on the known-good kernel in 249s, `new/state=bad` |
+
+The failure rehearsal used a valid kernel with `root=LABEL=rtpi-no-such-fs`, so it
+exercised the exact path we fear on this board — root not found on the USB-SATA bridge —
+and proved the dracut arguments turn it into an automatic reboot rather than a permanent
+hang.
+
 ### The candidate always inherits the known-good cmdline
 
 flash-kernel's `pi-try` does, verbatim:
