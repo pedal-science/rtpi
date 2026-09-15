@@ -2,7 +2,9 @@
 # self-clearing one-shot candidate boot.
 #
 # Base: upstream config/bootscripts/boot-rockchip.cmd (byte-identical to the stock
-# /boot/boot.cmd on this device). Only the four marked rtpi regions are added.
+# /boot/boot.cmd on this device). Four marked rtpi regions are added, and every path that
+# upstream writes as ${prefix}dtb is retargeted to ${rtpi_dtb} so that the chosen slot is
+# self-contained -- including the OVERLAY paths, which are marked inline below.
 #
 # WHAT THIS GIVES US
 # The Raspberry Pi has a firmware "tryboot" flag that is one-shot: it is cleared BEFORE
@@ -166,7 +168,14 @@ load ${devtype} ${devnum} ${fdt_addr_r} ${rtpi_dtb}/${fdtfile}
 fdt addr ${fdt_addr_r}
 fdt resize 65536
 for overlay_file in ${overlays}; do
-	if load ${devtype} ${devnum} ${load_addr} ${prefix}dtb/overlay/${overlay_prefix}-${overlay_file}.dtbo; then
+	# rtpi: ${rtpi_dtb}, not ${prefix}dtb. Upstream takes overlays from the live dtb
+	# directory, which Armbian's postinst repoints at the newest installed kernel. Left
+	# alone, a fallback boot would apply the CANDIDATE's overlays to the known-good DTB --
+	# so once the candidate is a 7.2 kernel, every fallback would be mixing 7.2 overlays
+	# into a 6.18 device tree. It fails safe (overlay_error restores the slot DTB) but
+	# fails safe means losing i2c1/i2c4/spi2/spidev2/uart1/uart2. The fallback path is the
+	# one that must never be fragile, so each slot uses its own overlays.
+	if load ${devtype} ${devnum} ${load_addr} ${rtpi_dtb}/overlay/${overlay_prefix}-${overlay_file}.dtbo; then
 		echo "Applying kernel provided DT overlay ${overlay_prefix}-${overlay_file}.dtbo"
 		fdt apply ${load_addr} || setenv overlay_error "true"
 	fi
@@ -183,7 +192,8 @@ if test "${overlay_error}" = "true"; then
 	load ${devtype} ${devnum} ${fdt_addr_r} ${rtpi_dtb}/${fdtfile}
 	# ============= end rtpi region 4 of 4 =============
 else
-	if load ${devtype} ${devnum} ${load_addr} ${prefix}dtb/overlay/${overlay_prefix}-fixup.scr; then
+	# rtpi: from the chosen slot, for the same reason as the overlays above.
+	if load ${devtype} ${devnum} ${load_addr} ${rtpi_dtb}/overlay/${overlay_prefix}-fixup.scr; then
 		echo "Applying kernel provided DT fixup script (${overlay_prefix}-fixup.scr)"
 		source ${load_addr}
 	fi
