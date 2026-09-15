@@ -26,3 +26,7 @@ devices/*/backups/**/*.tar.gz
 .DS_Store
 *.swp
 scratch/
+
+# Raw per-run test output. The assembled results/*.json are committed; the raw
+# cyclictest JSON + histograms behind them are bulky and regenerable.
+results/raw/

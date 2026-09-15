@@ -153,6 +153,35 @@ bump only the ABI (e.g. `7.0.0-1017rt1-raspi-realtime`).
 PREEMPT_RT it is not registered and forced threading is unconditional. Passing it is a
 no-op that will mislead you.
 
+### `RT_GROUP_SCHED=y` blocks SCHED_FIFO entirely on cgroup v2
+
+Armbian's stock tib kernel ships `CONFIG_RT_GROUP_SCHED=y`, and the system runs cgroup v2
+with the `cpu` controller enabled. That combination denies `SCHED_FIFO` to every task
+outside the root cgroup — **including root**:
+
+```bash
+$ sudo chrt -f 50 true
+chrt: failed to set pid 0's policy: Operation not permitted
+
+$ sudo bash -c 'echo $$ > /sys/fs/cgroup/cgroup.procs; chrt -f 50 true'   # works
+```
+
+This is not a benchmarking curiosity. Every systemd service and login session lives in a
+non-root cgroup, so on this kernel **JACK and every other realtime audio application is
+refused a realtime priority**. `cyclictest` fails the same way, with the unhelpful message
+`Unable to change scheduling policy!` even under `sudo`.
+
+`scripts/test/run-suite.sh` works around it by moving the measurement process into the root
+cgroup first. That is fine for a benchmark and wrong for production — the real fix is
+`CONFIG_RT_GROUP_SCHED=n`, which our config fragment already specifies. Treat this as an
+independent reason to build a custom kernel for tib, separate from PREEMPT_RT.
+
+Check it on any kernel with:
+
+```bash
+grep RT_GROUP_SCHED /boot/config-$(uname -r)
+```
+
 ### Detecting RT at runtime
 
 `/sys/kernel/realtime` **does not exist** — it was an out-of-tree RT-patch artifact that
