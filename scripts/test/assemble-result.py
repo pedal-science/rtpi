@@ -170,6 +170,8 @@ def main():
         "label": a.label,
         "tunables": {
             "governor": facts.get("governor", "unknown"),
+            "scaling_max_khz": facts.get("scaling_max_khz", "unknown"),
+            "cpuinfo_max_khz": facts.get("cpuinfo_max_khz", "unknown"),
             "rt_runtime_us": facts.get("rt_runtime_us", "unknown"),
             "rt_period_us": facts.get("rt_period_us", "unknown"),
             "watchdog": facts.get("watchdog", "unknown"),

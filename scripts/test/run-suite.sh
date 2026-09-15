@@ -23,6 +23,7 @@
 # Usage:
 #   run-suite.sh <piv|tib> [options]
 #     --duration N     seconds per period          (default 300)
+#     --max-freq KHZ   cap CPU frequency, restored afterwards (e.g. 1416000)
 #     --periods "..."  frame counts at 48kHz       (default "64 128 256")
 #     --governor G     set governor for the run, restored afterwards
 #     --no-load        measure idle instead of under load
@@ -37,6 +38,7 @@ require_ssh
 DURATION=300
 PERIODS="64 128 256"
 GOVERNOR=""
+MAXFREQ=""
 WITH_LOAD=1
 LABEL=""
 
@@ -45,6 +47,7 @@ while [[ $# -gt 0 ]]; do
     --duration) DURATION="$2"; shift 2 ;;
     --periods)  PERIODS="$2";  shift 2 ;;
     --governor) GOVERNOR="$2"; shift 2 ;;
+    --max-freq) MAXFREQ="$2"; shift 2 ;;
     --no-load)  WITH_LOAD=0;   shift ;;
     --label)    LABEL="$2";    shift 2 ;;
     *) die "unknown option: $1" ;;
@@ -75,6 +78,8 @@ echo "kernel_version=$(uname -v)"
 if uname -v | grep -q PREEMPT_RT; then echo "realtime=true"; else echo "realtime=false"; fi
 echo "nproc=$(nproc)"
 echo "governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
+echo "scaling_max_khz=$(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq 2>/dev/null || echo unknown)"
+echo "cpuinfo_max_khz=$(cat /sys/devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq 2>/dev/null || echo unknown)"
 echo "rt_runtime_us=$(cat /proc/sys/kernel/sched_rt_runtime_us 2>/dev/null || echo unknown)"
 echo "rt_period_us=$(cat /proc/sys/kernel/sched_rt_period_us 2>/dev/null || echo unknown)"
 echo "watchdog=$(systemctl show -p RuntimeWatchdogUSec --value 2>/dev/null || echo unknown)"
@@ -115,16 +120,44 @@ KERNEL=$(grep '^kernel_release=' "$RAW_DIR/facts.txt" | cut -d= -f2-)
 ORIG_GOV=$(grep '^governor=' "$RAW_DIR/facts.txt" | cut -d= -f2-)
 
 # ---------------------------------------------------------------- governor
-restore_governor() {
-  [[ -n $GOVERNOR && -n $ORIG_GOV && $ORIG_GOV != unknown ]] || return 0
-  log "restoring governor to $ORIG_GOV"
-  dev_ssh "echo $ORIG_GOV | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null" || true
+ORIG_MAXFREQ=$(dev_ssh "cat /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq 2>/dev/null" || echo "")
+
+restore_tunables() {
+  if [[ -n $GOVERNOR && -n $ORIG_GOV && $ORIG_GOV != unknown ]]; then
+    log "restoring governor to $ORIG_GOV"
+    dev_ssh "echo $ORIG_GOV | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null" || true
+  fi
+  if [[ -n $MAXFREQ && -n $ORIG_MAXFREQ ]]; then
+    log "restoring max frequency to $ORIG_MAXFREQ"
+    dev_ssh "echo $ORIG_MAXFREQ | sudo tee /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq >/dev/null" || true
+  fi
 }
+if [[ -n $GOVERNOR || -n $MAXFREQ ]]; then
+  trap restore_tunables EXIT
+fi
+
+# Frequency cap FIRST, so that switching to the performance governor -- which immediately
+# runs at scaling_max_freq -- cannot briefly slam the board to 1.8GHz.
+#
+# This exists because this board cannot sustain its top bin: on 2026-09-15 a 15-minute
+# suite drove it into the 90C critical trip and the kernel shut the board down mid-run. It
+# idles in the 60s with passive trips at 70C and 75C, so an uncapped run does not measure a
+# 1.8GHz machine -- it measures whatever the thermal governor leaves after throttling, and
+# a different amount of it on every run. A cap the board can actually hold is both
+# survivable AND reproducible, which matters more for comparison than a high number.
+if [[ -n $MAXFREQ ]]; then
+  log "capping CPU frequency at $(( MAXFREQ / 1000 ))MHz (was $(( ${ORIG_MAXFREQ:-0} / 1000 ))MHz)"
+  dev_ssh "echo $MAXFREQ | sudo tee /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq >/dev/null" \
+    || die "could not set scaling_max_freq"
+  ACTUAL=$(dev_ssh "cat /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq")
+  [[ $ACTUAL == "$MAXFREQ" ]] || warn "requested $MAXFREQ but got $ACTUAL (not an available operating point?)"
+  ok "max frequency now $(( ACTUAL / 1000 ))MHz"
+fi
+
 if [[ -n $GOVERNOR ]]; then
   log "setting governor to $GOVERNOR (was $ORIG_GOV)"
   dev_ssh "echo $GOVERNOR | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null" \
     || die "could not set governor"
-  trap restore_governor EXIT
 fi
 
 # ---------------------------------------------------------------- the runs
