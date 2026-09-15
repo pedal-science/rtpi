@@ -28,6 +28,22 @@
 # bootloader region, the partition table, and the structural soundness of the copied
 # filesystem.
 #
+# WHAT THAT VERIFICATION DOES NOT PROVE -- learned the hard way on 2026-09-15
+# Every check below passed on a 32GB card that then would not boot at all: no HDMI
+# output, no network, nothing. The bootloader region hashed identical to the source and
+# the filesystem was clean, so the COPY was correct; the card simply could not be read by
+# the RK3288 BootROM, whose SD driver is far more primitive than Linux's and is known to
+# reject cards that work perfectly once Linux is up.
+#
+# So: a passing verification here means "the bytes are right", NOT "this card will boot".
+# The only proof of that is a physical swap and power-on. Always boot-test a recovery card
+# before trusting it, and prefer a card of the same make and model as the one the board
+# already boots from.
+#
+# The card-independent backup is the compressed whole-device image pulled to the Mac (see
+# README, "Restoring tib from an image"). That can be written to any card later, so it
+# does not depend on one specific card being BootROM-compatible.
+#
 # Usage: clone-sd.sh <piv|tib> --target /dev/sdX [--yes]
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
@@ -143,7 +159,14 @@ sudo rmdir /mnt/rtpi-clone
 REMOTE
 
 echo >&2
-ok "clone complete"
+ok "clone complete — the bytes are correct"
+warn "THIS DOES NOT PROVE THE CARD BOOTS."
+warn "  A structurally perfect clone has already been observed failing to boot on this"
+warn "  hardware: the RK3288 BootROM rejects some cards Linux handles fine. Boot-test it"
+warn "  now, while you can still fall back to the original, rather than discovering it"
+warn "  during an actual emergency:"
+warn "    poweroff -> remove the reader -> swap the clone in -> power on -> check it comes up"
+
 warn "IMPORTANT: the clone has the SAME filesystem UUID as the original"
 warn "  ($(dev_ssh "sudo blkid -s UUID -o value ${SOURCE}p1 2>/dev/null || sudo blkid -s UUID -o value ${SOURCE}1"))"
 warn "  and this board boots with root=UUID=. Leaving the clone plugged in during a boot"

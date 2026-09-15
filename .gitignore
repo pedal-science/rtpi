@@ -30,3 +30,7 @@ scratch/
 # Raw per-run test output. The assembled results/*.json are committed; the raw
 # cyclictest JSON + histograms behind them are bulky and regenerable.
 results/raw/
+
+# Whole-card images pulled to the Mac. Multi-GB; regenerable from the board.
+devices/*/backups/**/*.img.zst
+devices/*/backups/**/*.img
