@@ -110,9 +110,19 @@ fi
 # Prove the bootloader is in there: the Rockchip idbloader lives at sector 64 and is the
 # part a file-level backup misses. If this is absent the image will not boot anything.
 log "checking the image contains a bootloader at sector 64"
-zstd -dc "$IMG" | dd bs=512 skip=64 count=8064 2>/dev/null | strings -a | grep -m1 -E 'U-Boot 20[0-9][0-9]' \
-  && ok "bootloader present in the image" \
-  || warn "no U-Boot version string found at sector 64 — is this the right card?"
+# pipefail must be OFF for this one check. `grep -m1` exits on first match, which sends
+# SIGPIPE to zstd upstream; with pipefail that non-zero status propagates and the check
+# reports failure even when the string was found. Capture the match, then judge on the
+# string itself rather than on the pipeline's exit status.
+set +o pipefail
+BOOTLOADER=$(zstd -dc "$IMG" 2>/dev/null | dd bs=512 skip=64 count=8064 2>/dev/null \
+             | strings -a | grep -m1 -E 'U-Boot 20[0-9][0-9]' || true)
+set -o pipefail
+if [[ -n $BOOTLOADER ]]; then
+  ok "bootloader present in the image: ${BOOTLOADER#d}"
+else
+  warn "no U-Boot version string found at sector 64 — is this the right card?"
+fi
 
 ls -lh "$OUT" >&2
 ok "image written: $IMG"
