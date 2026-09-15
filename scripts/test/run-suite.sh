@@ -160,6 +160,20 @@ if [[ -n $GOVERNOR ]]; then
     || die "could not set governor"
 fi
 
+# Re-read the tunables AFTER changing them, and overwrite what was captured before.
+# The facts block runs first, so without this the result records the state the board was
+# in when we arrived rather than the state it was measured in -- a run made at
+# performance/1416MHz would be filed as ondemand/1800MHz. Recording the wrong tunables is
+# worse than recording none, because the numbers look comparable and are not.
+if [[ -n $GOVERNOR || -n $MAXFREQ ]]; then
+  NEW_GOV=$(dev_ssh "cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor 2>/dev/null" || echo unknown)
+  NEW_CAP=$(dev_ssh "cat /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq 2>/dev/null" || echo unknown)
+  sed -i.bak -e "s|^governor=.*|governor=$NEW_GOV|" \
+             -e "s|^scaling_max_khz=.*|scaling_max_khz=$NEW_CAP|" "$RAW_DIR/facts.txt"
+  rm -f "$RAW_DIR/facts.txt.bak"
+  ok "recording tunables actually in force: governor=$NEW_GOV cap=$(( NEW_CAP / 1000 ))MHz"
+fi
+
 # ---------------------------------------------------------------- the runs
 NPROC=$(grep '^nproc=' "$RAW_DIR/facts.txt" | cut -d= -f2-)
 LOAD_DESC="idle"

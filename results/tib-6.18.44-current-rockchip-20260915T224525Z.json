@@ -1,0 +1,70 @@
+{
+  "audio_cards": " 0 [Audio ]: USB-Audio - USB Audio| Generic USB Audio at usb-ff500000.usb-1, high speed| 1 [HDMI ]: simple-card - HDMI| HDMI|",
+  "board": "tib",
+  "config_hash": "sha256:b777a6c784d3a6bc20cf4aac8bf89351ada0a41ed813c501a67aad476d028eec",
+  "cyclictest": {
+    "128": {
+      "avg_us": 47,
+      "duration_s": 300,
+      "histogram_overflows": 137,
+      "interval_us": 2666,
+      "max_us": 7941,
+      "min_us": 11,
+      "p50_us": 33,
+      "p99_99_us": null,
+      "p99_9_us": 335,
+      "p99_us": 87,
+      "period_frames": 128,
+      "samples": 450070
+    },
+    "256": {
+      "avg_us": 53,
+      "duration_s": 300,
+      "histogram_overflows": 101,
+      "interval_us": 5333,
+      "max_us": 7866,
+      "min_us": 12,
+      "p50_us": 40,
+      "p99_99_us": null,
+      "p99_9_us": 413,
+      "p99_us": 115,
+      "period_frames": 256,
+      "samples": 225000
+    },
+    "64": {
+      "avg_us": 41,
+      "duration_s": 300,
+      "histogram_overflows": 484,
+      "interval_us": 1333,
+      "max_us": 8136,
+      "min_us": 7,
+      "p50_us": 30,
+      "p99_99_us": null,
+      "p99_9_us": 353,
+      "p99_us": 81,
+      "period_frames": 64,
+      "samples": 899827
+    }
+  },
+  "kernel": "6.18.44-current-rockchip",
+  "kernel_version": "#1 SMP Sun Aug  9 18:25:30 UTC 2026",
+  "label": "stock 6.18, performance governor, capped 1416MHz, under load",
+  "load": "stress-ng --cpu 4 --io 2 --vm 1 --vm-bytes 128M + hackbench",
+  "realtime": false,
+  "timestamp": "20260915T224525Z",
+  "tunables": {
+    "_corrected": "governor and cap re-stated: the harness captured them before applying them; confirmed by the run log and by thermal last_khz=1416000",
+    "cpuinfo_max_khz": "1800000",
+    "governor": "performance",
+    "hz": "250",
+    "no_hz_full": "n",
+    "nproc": "4",
+    "rcu_boost": "n",
+    "rt_group_sched": "y",
+    "rt_period_us": "1000000",
+    "rt_runtime_us": "950000",
+    "scaling_max_khz": "1416000",
+    "sched_fifo_in_cgroup": "false",
+    "watchdog": "30s"
+  }
+}
