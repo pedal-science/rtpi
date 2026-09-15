@@ -1,27 +1,49 @@
-# tib (RK3288, ARMv7) specific deltas, applied after audio-rt-common.fragment.
+# tib (RK3288, Cortex-A17, ARMv7) — RT deltas on top of audio-rt-common.fragment
 #
-# Requires kernel >= 7.2.6:
-#   - ARM32 ARCH_SUPPORTS_RT landed in v7.1 (commit c6e61c06d606).
-#   - The three follow-up RT fixes (9483/1, 9484/1, 9485/1) landed in stable v7.2.6.
-#     Verified by bisecting stable tags: HAVE_POSIX_CPU_TIMERS_TASK_WORK is absent in
-#     v7.2..v7.2.5 and present in v7.2.6. Without 9483/1, POSIX CPU timers expire in hard
-#     IRQ context and run_posix_cpu_timers() takes the sleeping sighand->siglock, giving
-#     "BUG: sleeping function called from invalid context" — reachable from
-#     setitimer(ITIMER_PROF) and timer_create(), which audio software does use.
-# Armbian's 'edge' branch tracks kernel.org stable branch:linux-7.2.y, so this is
-# satisfied with no patches. patches/ is intentionally empty for this device.
+# Merged with scripts/kconfig/merge_config.sh, so a symbol being turned OFF must be
+# written as "# CONFIG_X is not set". "CONFIG_X=n" is silently ignored by the merge,
+# which is a good way to believe you disabled something you did not.
 
-# PREEMPT_RT depends on EXPERT; Armbian's config already sets it, but be explicit.
+# PREEMPT_RT depends on EXPERT && ARCH_SUPPORTS_RT && !COMPILE_TEST. Armbian's config
+# already sets EXPERT, but state it so the fragment stands alone.
 CONFIG_EXPERT=y
 
-# HIGHMEM is RT-safe on arm32 (it selects KMAP_LOCAL). The one genuine conflict is
-# HIGHPTE, whose Kconfig reads "depends on HIGHMEM && !PREEMPT_RT" — already off in
-# Armbian's config, but pin it so a config refresh cannot reintroduce it.
-# CONFIG_HIGHPTE is not set
+# THE SYMBOL THAT MATTERS MOST, and not for the reason the guides give.
+#
+# With RT_GROUP_SCHED=y on cgroup v2 with the cpu controller enabled, SCHED_FIFO is
+# refused to any task outside the root cgroup -- including root. Measured on this board:
+#
+#     $ sudo chrt -f 50 true
+#     chrt: failed to set pid 0's policy: Operation not permitted
+#
+# Every systemd service and login session lives in a non-root cgroup, so on the stock
+# Armbian kernel JACK and every other realtime audio application is refused a realtime
+# priority outright. That is a hard blocker for the whole point of this project, quite
+# separate from PREEMPT_RT, and it is why cyclictest needs a root-cgroup escape to run
+# at all on the stock kernel.
+# CONFIG_RT_GROUP_SCHED is not set
 
-# NOTE ON threadirqs: do NOT add `threadirqs` to the kernel cmdline on an RT kernel.
-# kernel/irq/manage.c guards that early_param with
-#     #if defined(CONFIG_IRQ_FORCED_THREADING) && !defined(CONFIG_PREEMPT_RT)
-# so under PREEMPT_RT the parameter is not registered at all and forced threading is
-# unconditional. Passing it is a no-op that would mislead us into thinking we had
-# changed something.
+# PREEMPT_RT supersedes these; leaving one set makes the merge ambiguous.
+# CONFIG_PREEMPT_NONE is not set
+# CONFIG_PREEMPT_VOLUNTARY is not set
+# CONFIG_PREEMPT is not set
+
+# Stock Armbian runs HZ_250. Both must be cleared or the merge leaves two tick rates set
+# and the later one silently wins.
+# CONFIG_HZ_250 is not set
+# CONFIG_HZ_100 is not set
+# CONFIG_HZ_300 is not set
+
+# Costly on every preempt operation and measurable in cyclictest's tail.
+# CONFIG_DEBUG_PREEMPT is not set
+
+# HIGHMEM is RT-safe on arm32 (it selects KMAP_LOCAL). The one genuine conflict is
+# HIGHPTE, which is "depends on HIGHMEM && !PREEMPT_RT" -- so enabling RT turns it off by
+# itself. Stated here only so the next person does not go looking for the problem.
+CONFIG_HIGHMEM=y
+
+# NOT set, deliberately: NO_HZ_FULL needs CPUs isolated from the tick to pay for itself,
+# and on a 4-core board running a full desktop-ish Armbian userspace there are none to
+# spare. NO_HZ_IDLE is the right choice here. Revisit only with isolcpus.
+CONFIG_NO_HZ_IDLE=y
+# CONFIG_NO_HZ_FULL is not set

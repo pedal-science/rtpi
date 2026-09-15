@@ -18,9 +18,12 @@ help: ## Show this help
 
 ## Environment
 .PHONY: colima-up
-colima-up: ## Start colima sized for kernel builds (8 CPU / 12G / 80G)
+colima-up: ## Start colima sized for kernel builds (6 CPU / 8G)
+	@# 8G of the Mac's 16G, and 6 of 8 CPUs. The original 12G left macOS 4G and would have
+	@# swapped -- which on a build this I/O-heavy costs more than the extra RAM gains.
+	@# Disk is whatever the profile was created with; colima cannot shrink it in place.
 	@colima status >/dev/null 2>&1 && echo "colima already running" || \
-	  colima start --cpu 8 --memory 12 --disk 80
+	  colima start --cpu 6 --memory 8
 	@docker info >/dev/null
 
 .PHONY: image

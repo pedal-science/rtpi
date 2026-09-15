@@ -1,36 +1,32 @@
-# Build artefacts — large, reproducible from sources. Never commit.
-*.deb
-*.ddeb
-*.buildinfo
-*.changes
-build/
-work/
-sources/
-*.tar.gz
-*.tar.xz
-*.diff.gz
-*.dsc
-
-# Kernel trees live in a Docker volume, never here.
-linux/
-linux-*/
 
 # Backups pulled from devices. The boot tarballs are hundreds of MB, so those stay
+# Build artefacts — large, reproducible from sources. Never commit.
+# Kernel trees live in a Docker volume, never here.
+# Local scratch
+# Raw per-run test output. The assembled results/*.json are committed; the raw
+# Whole-card images pulled to the Mac. Multi-GB; regenerable from the board.
+# cyclictest JSON + histograms behind them are bulky and regenerable.
+# is the difference between restoring tib and re-imaging it.
 # local — but the small text artefacts and the U-Boot env image are committed, because
 # they are exactly what you want in front of you during a recovery, and a 32KB env image
-# is the difference between restoring tib and re-imaging it.
+*.buildinfo
+*.changes
+*.ddeb
+*.deb
+*.diff.gz
+*.dsc
+*.swp
+*.tar.gz
+*.tar.xz
+.DS_Store
+build/
+devices/*/backups/**/*.img
+devices/*/backups/**/*.img.zst
 devices/*/backups/**/*.tar
 devices/*/backups/**/*.tar.gz
-
-# Local scratch
-.DS_Store
-*.swp
-scratch/
-
-# Raw per-run test output. The assembled results/*.json are committed; the raw
-# cyclictest JSON + histograms behind them are bulky and regenerable.
+linux-*/
+linux/
 results/raw/
-
-# Whole-card images pulled to the Mac. Multi-GB; regenerable from the board.
-devices/*/backups/**/*.img.zst
-devices/*/backups/**/*.img
+scratch/
+sources/
+work/
