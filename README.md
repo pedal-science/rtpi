@@ -172,25 +172,81 @@ on its compiled-in defaults. `libubootenv`'s `fw_setenv` has no built-in default
 reads `/etc/u-boot-initial-env`, which does not exist), so a *first* `fw_setenv` writes a
 valid-CRC environment containing **only** your variable, destroying `bootcmd`.
 
-So, once, over the serial console, at the U-Boot prompt:
+**This needs no serial console.** `saveenv` *from inside U-Boot* has no such problem — it
+serialises the complete in-memory environment, which at that point is the full compiled-in
+default set. So rtpi region 1 of our [boot.cmd](devices/tib/boot/boot.cmd) does the
+bootstrap itself, on the first boot that finds `rt_try` undefined:
 
 ```
-=> saveenv
+if test "${rt_try}" = ""; then
+	setenv rt_try 0
+	if saveenv; then ...
+fi
 ```
 
-That persists the complete current environment. Then verify from Linux:
+It is placed *before* the `armbianEnv.txt` import, so what gets persisted is U-Boot's own
+defaults plus `rt_try` — not a copy of `armbianEnv.txt`, which is re-imported from the
+filesystem every boot anyway.
+
+Verified against this board's own U-Boot config (`/usr/lib/u-boot/tinker-s-rk3288_defconfig`):
+
+| symbol | value | meaning |
+|---|---|---|
+| `CONFIG_ENV_IS_IN_MMC` | `y` | env lives in MMC |
+| `CONFIG_ENV_MMC_DEVICE_INDEX` | **`1`** | U-Boot mmc1 = **the SD card**, not eMMC |
+| `CONFIG_ENV_OFFSET` | `0x3f8000` | matches `UBOOT_ENV_OFFSET` |
+| `CONFIG_ENV_SIZE` | `0x8000` | matches `UBOOT_ENV_SIZE` |
+| `CONFIG_CMD_SAVEENV` | `y` | `saveenv` is compiled in |
+
+So the order is: **install `boot.scr` → reboot once → verify → only then `fw_setenv`.**
 
 ```bash
+make status-tib                    # decodes and CRC-checks the region — must say VALID
 sudo fw_printenv | head            # should list ~27 variables including bootcmd
-make status-tib                    # decodes and CRC-checks the region
 ```
 
-`scripts/safety/preflight.sh tib` refuses to proceed until this reports VALID.
+`scripts/safety/preflight.sh tib` refuses to proceed until this reports VALID. If the
+bootstrap `saveenv` failed for any reason the region simply stays unwritten, U-Boot keeps
+using its defaults, and the board still boots — so this fails safe.
 
-## Serial console
+## Out-of-band console
 
-One **FTDI TTL-232R-3V3** cable per board is all you need. (The Raspberry Pi Debug Probe
-adds nothing here.)
+**Serial is optional on tib.** Its U-Boot is built with `CONFIG_VIDEO=y`,
+`CONFIG_VIDEO_DW_HDMI=y`, `CONFIG_USB_KEYBOARD=y` and `CONFIG_CONSOLE_MUX=y`, and its
+built-in environment is:
+
+```
+stdout=serial,vidconsole
+stderr=serial,vidconsole
+stdin=serial,usbkbd
+```
+
+So **a monitor plus a USB keyboard gives a fully interactive U-Boot prompt**, including
+"Hit any key to stop autoboot". The kernel cmdline already carries
+`console=ttyS2,115200n8 console=tty1`, so kernel messages reach the screen too.
+
+What HDMI does *not* give you, and serial does:
+
+| | serial | HDMI + USB keyboard |
+|---|---|---|
+| interactive U-Boot rescue | yes | **yes** |
+| see the kernel boot failure | yes | yes |
+| earliest SPL output, before video init | yes | **no** |
+| capture/scroll the log into a file | yes | photograph the screen |
+| read a failure **remotely, unattended** | yes | no — you walk over and look |
+
+A permanently-attached FTDI cable is the only way to read a failed boot from the Mac
+without being at the board. That is its remaining value; nothing in this repo *requires*
+it.
+
+Also compiled in: `CONFIG_PSTORE_RAM=y` and `CONFIG_PSTORE_CONSOLE=y`, so a reserved
+ramoops region would let the kernel log survive the watchdog reset and be read from
+`/sys/fs/pstore` on the fallback boot — kernel-stage diagnosis with no cable at all. Not
+set up yet.
+
+### Pinouts, if you do use serial
+
+One **FTDI TTL-232R-3V3** cable per board. (The Raspberry Pi Debug Probe adds nothing here.)
 
 | board | TX | RX | GND | settings |
 |---|---|---|---|---|
@@ -239,15 +295,25 @@ Work down this list. Each step assumes the one before it failed.
 
 ### tib will not come back
 
+**There is no eMMC on this board.** `mmc@ff0f0000` (the eMMC controller) is enabled but
+reports no card, and `mmc@ff0e0000` is disabled — `lsblk` shows only `mmcblk0`, the SD.
+The Rockchip idbloader is at sector 64 of `/dev/mmcblk0` and the env region at LBA 8128,
+both *before* partition 1 at sector 8192. So **writing a fresh image to the SD card
+replaces the bootloader, its environment and the root filesystem in one go**, with nothing
+surviving elsewhere to override it. Step 4 below is a genuine total reset.
+
 1. **Power-cycle once.** The one-shot flag is cleared before the candidate boots, so a
    cold boot uses the frozen known-good slot.
-2. **Serial console** (pins 32/33/34, 115200). Interrupt U-Boot (`BOOTDELAY=1`, so be
-   quick) and boot known-good by hand:
+2. **Attach a monitor and a USB keyboard.** U-Boot's console is muxed to HDMI and it
+   accepts a USB keyboard, so you get the prompt without any cable. Interrupt U-Boot
+   (`BOOTDELAY=1`, so be quick) and boot known-good by hand:
    ```
    => setenv rt_try 0
    => saveenv
    => boot
    ```
+   (Serial, on pins 32/33/34 at 115200, gets you the same prompt — plus the earliest
+   output, which HDMI misses because video init happens later.)
 3. **If the U-Boot environment is corrupt**, U-Boot falls back to its compiled-in defaults,
    which still boot. To reset it explicitly:
    ```
@@ -259,7 +325,12 @@ Work down this list. Each step assumes the one before it failed.
    sudo dd if=devices/tib/backups/latest/uboot-env.bin of=/dev/diskN bs=512 seek=8128 count=64
    ```
    Check `decode-uboot-env.py` reports VALID on the backup first.
-5. **Swap in the spare SD card.** This is the floor: it always works.
+5. **Write a fresh image to the spare SD card.** This is the floor: it always works, and
+   because everything lives on the card it is a complete reset. The cost is that you lose
+   the board's state and learn nothing about *why* it failed — which is what the scripts
+   in this repo exist to make cheap to rebuild. Afterwards, re-run the tib setup from this
+   repo (Phase 5: freeze the known-good slot, install `boot.scr`, reboot to bootstrap the
+   env, then `make tib-rt`).
 
 ### What none of this covers
 

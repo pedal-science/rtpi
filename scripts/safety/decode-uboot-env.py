@@ -18,6 +18,13 @@ variable you set — destroying bootcmd and stopping the board booting.
 
 So: this script must report VALID before anything calls fw_setenv.
 
+The bootstrap that makes it VALID needs no serial console. rtpi region 1 of our custom
+boot.cmd runs `saveenv` from inside U-Boot on the first boot that finds rt_try undefined,
+and saveenv serialises the COMPLETE in-memory environment (the compiled-in defaults), not
+just one variable. Confirmed against this board's U-Boot config: CONFIG_ENV_IS_IN_MMC=y,
+CONFIG_ENV_MMC_DEVICE_INDEX=1 (U-Boot mmc1 = the SD card), CONFIG_ENV_OFFSET=0x3f8000,
+CONFIG_ENV_SIZE=0x8000, CONFIG_CMD_SAVEENV=y.
+
 Exit codes:  0 = valid env   1 = empty/never-written   2 = present but CRC mismatch
 """
 
@@ -47,8 +54,12 @@ def main() -> int:
         print("STATUS          : EMPTY — U-Boot has never saved an environment.")
         print()
         print("  U-Boot is running on its compiled-in default environment.")
-        print("  DO NOT run fw_setenv against this. Run `saveenv` once at the U-Boot")
-        print("  serial console first, which persists the complete current environment.")
+        print("  DO NOT run fw_setenv against this yet.")
+        print()
+        print("  To bootstrap: install our boot.scr (which runs saveenv from inside")
+        print("  U-Boot on the first boot that finds rt_try undefined) and reboot once.")
+        print("  Then re-run this check — it must report VALID before any fw_setenv.")
+        print("  No serial console is needed for this.")
         return 1
 
     if stored != computed:

@@ -2,7 +2,7 @@
 # self-clearing one-shot candidate boot.
 #
 # Base: upstream config/bootscripts/boot-rockchip.cmd (byte-identical to the stock
-# /boot/boot.cmd on this device). Only the three marked rtpi regions are added.
+# /boot/boot.cmd on this device). Only the four marked rtpi regions are added.
 #
 # WHAT THIS GIVES US
 # The Raspberry Pi has a firmware "tryboot" flag that is one-shot: it is cleared BEFORE
@@ -25,6 +25,46 @@
 # Compile with:
 #   mkimage -C none -A arm -T script -d /boot/boot.cmd /boot/boot.scr
 
+# ==================== rtpi region 1 of 4: bootstrap the environment ====================
+# This board has NEVER run saveenv: the env region (0x3f8000, 0x8000 bytes) is all zeros
+# with a zero CRC, so U-Boot is running on its compiled-in defaults.
+#
+# That is a trap for the Linux side. libubootenv's fw_setenv has no built-in defaults --
+# it reads /etc/u-boot-initial-env, which does not exist here -- so the FIRST fw_setenv
+# would write a valid-CRC environment containing ONLY the variable it was asked to set,
+# destroying bootcmd and stopping the board booting.
+#
+# saveenv from inside U-Boot has no such problem: it serialises the CURRENT in-memory
+# environment -- the complete working environment U-Boot booted with. So we do the
+# bootstrap here, from the boot script, and NO SERIAL CONSOLE is required for it.
+#
+# Confirmed against this board's own U-Boot config, shipped at
+# /usr/lib/u-boot/tinker-s-rk3288_defconfig by linux-u-boot-tinkerboard-current:
+#   CONFIG_ENV_IS_IN_MMC=y   CONFIG_CMD_SAVEENV=y
+#   CONFIG_ENV_MMC_DEVICE_INDEX=1   <- U-Boot mmc1 is the SD card, so saveenv and
+#                                      fw_setenv write the SAME region
+#   CONFIG_ENV_OFFSET=0x3f8000   CONFIG_ENV_SIZE=0x8000
+#
+# Deliberately the FIRST thing the script does: before our own setenv defaults below and
+# before the armbianEnv.txt import, so what gets persisted is the environment U-Boot
+# itself booted with plus rt_try -- not this script's working variables, and not a copy of
+# armbianEnv.txt, which is re-imported from the filesystem on every boot anyway.
+#
+# Runs once: after this, rt_try is defined, so the test is false on every later boot.
+# If saveenv fails we carry on regardless -- the env simply stays unwritten, U-Boot keeps
+# using its defaults, and the board still boots. The Linux side must NOT assume this
+# worked: verify with scripts/safety/decode-uboot-env.py before ever calling fw_setenv.
+if test "${rt_try}" = ""; then
+	echo "rtpi: no rt_try in environment - bootstrapping a full env with saveenv"
+	setenv rt_try 0
+	if saveenv; then
+		echo "rtpi: environment bootstrapped; fw_setenv is now safe to use"
+	else
+		echo "rtpi: saveenv FAILED - env still unwritten, do NOT use fw_setenv"
+	fi
+fi
+# ==================== end rtpi region 1 of 4 ====================
+
 setenv ramdisk_addr_r "0x21000000"
 setenv load_addr "0x39000000"
 setenv overlay_error "false"
@@ -44,7 +84,7 @@ if test -e ${devtype} ${devnum} ${prefix}armbianEnv.txt; then
 	env import -t ${load_addr} ${filesize}
 fi
 
-# ==================== rtpi region 1 of 3: choose the slot ====================
+# ==================== rtpi region 2 of 4: choose the slot ====================
 # Default to the frozen known-good slot. Every failure path below leaves these alone,
 # so anything unexpected fails SAFE.
 setenv rtpi_krn "${prefix}zImage-good"
@@ -91,7 +131,7 @@ if test "${rt_try}" = "1"; then
 fi
 
 echo "rtpi: booting slot: ${rtpi_slot}  (${rtpi_krn})"
-# ==================== end rtpi region 1 of 3 ====================
+# ==================== end rtpi region 2 of 4 ====================
 
 if test "${logo}" = "disabled"; then setenv logo "logo.nologo"; fi
 
@@ -115,14 +155,14 @@ if test "${docker_optimizations}" = "on"; then setenv bootargs "${bootargs} cgro
 
 if test "${board}" = "miqi_rk3288"; then setenv fdtfile "rk3288-miqi.dtb"; fi
 
-# ==================== rtpi region 2 of 3: load from the chosen slot ====================
+# ==================== rtpi region 3 of 4: load from the chosen slot ====================
 # Upstream loads ${prefix}uInitrd / ${prefix}zImage / ${prefix}dtb/${fdtfile} directly.
 # We load from the slot selected above instead.
 load ${devtype} ${devnum} ${ramdisk_addr_r} ${rtpi_ird}
 load ${devtype} ${devnum} ${kernel_addr_r} ${rtpi_krn}
 
 load ${devtype} ${devnum} ${fdt_addr_r} ${rtpi_dtb}/${fdtfile}
-# ==================== end rtpi region 2 of 3 ====================
+# ==================== end rtpi region 3 of 4 ====================
 fdt addr ${fdt_addr_r}
 fdt resize 65536
 for overlay_file in ${overlays}; do
@@ -139,9 +179,9 @@ for overlay_file in ${user_overlays}; do
 done
 if test "${overlay_error}" = "true"; then
 	echo "Error applying DT overlays, restoring original DT"
-	# ============= rtpi region 3 of 3: restore from the chosen slot =============
+	# ============= rtpi region 4 of 4: restore from the chosen slot =============
 	load ${devtype} ${devnum} ${fdt_addr_r} ${rtpi_dtb}/${fdtfile}
-	# ============= end rtpi region 3 of 3 =============
+	# ============= end rtpi region 4 of 4 =============
 else
 	if load ${devtype} ${devnum} ${load_addr} ${prefix}dtb/overlay/${overlay_prefix}-fixup.scr; then
 		echo "Applying kernel provided DT fixup script (${overlay_prefix}-fixup.scr)"

@@ -59,7 +59,8 @@ case "$DEVICE" in
       ok "U-Boot env is a valid saved environment"
     else
       warn "FAIL: U-Boot env is NOT valid (never saved, or corrupt)."
-      warn "      Run 'saveenv' once at the U-Boot serial console before using fw_setenv."
+      warn "      Install our boot.scr and reboot once: rtpi region 1 runs saveenv from"
+      warn "      inside U-Boot, which writes a complete env. Then re-run this check."
       warn "      See README 'Bootstrapping tib's U-Boot environment'."
       fails=$((fails+1))
     fi
