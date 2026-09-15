@@ -1,0 +1,13 @@
+# piv (BCM2712, arm64) specific deltas.
+#
+# Ubuntu's linux-raspi source already defines a `raspi-realtime` flavour whose
+# annotations set PREEMPT_RT, HZ_1000, NO_HZ_FULL, RCU_BOOST, RCU_NOCB_CPU_CB_BOOST,
+# RT_GROUP_SCHED=n, DEBUG_PREEMPT=n, THP off, and crucially leave the OSNOISE/TIMERLAT/
+# HWLAT tracers ENABLED so rtla works. So the delta here is small by design — most of the
+# remaining win is kernel cmdline and runtime tuning, not config.
+
+# Page size must stay 4K to match the existing userland (getconf PAGESIZE = 4096).
+# A 16K-page kernel would be a different ABI for anything that assumes page size.
+CONFIG_ARM64_4K_PAGES=y
+# CONFIG_ARM64_16K_PAGES is not set
+# CONFIG_ARM64_64K_PAGES is not set

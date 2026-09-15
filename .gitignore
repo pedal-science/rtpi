@@ -1,0 +1,26 @@
+# Build artefacts — large, reproducible from sources. Never commit.
+*.deb
+*.ddeb
+*.buildinfo
+*.changes
+build/
+work/
+sources/
+*.tar.gz
+*.tar.xz
+*.diff.gz
+*.dsc
+
+# Kernel trees live in a Docker volume, never here.
+linux/
+linux-*/
+
+# Backups pulled from devices can be large; keep the small text ones only.
+devices/*/backups/*.tar
+devices/*/backups/*.tar.gz
+devices/*/backups/*/
+
+# Local scratch
+.DS_Store
+*.swp
+scratch/

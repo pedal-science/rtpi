@@ -1,0 +1,27 @@
+# tib (RK3288, ARMv7) specific deltas, applied after audio-rt-common.fragment.
+#
+# Requires kernel >= 7.2.6:
+#   - ARM32 ARCH_SUPPORTS_RT landed in v7.1 (commit c6e61c06d606).
+#   - The three follow-up RT fixes (9483/1, 9484/1, 9485/1) landed in stable v7.2.6.
+#     Verified by bisecting stable tags: HAVE_POSIX_CPU_TIMERS_TASK_WORK is absent in
+#     v7.2..v7.2.5 and present in v7.2.6. Without 9483/1, POSIX CPU timers expire in hard
+#     IRQ context and run_posix_cpu_timers() takes the sleeping sighand->siglock, giving
+#     "BUG: sleeping function called from invalid context" — reachable from
+#     setitimer(ITIMER_PROF) and timer_create(), which audio software does use.
+# Armbian's 'edge' branch tracks kernel.org stable branch:linux-7.2.y, so this is
+# satisfied with no patches. patches/ is intentionally empty for this device.
+
+# PREEMPT_RT depends on EXPERT; Armbian's config already sets it, but be explicit.
+CONFIG_EXPERT=y
+
+# HIGHMEM is RT-safe on arm32 (it selects KMAP_LOCAL). The one genuine conflict is
+# HIGHPTE, whose Kconfig reads "depends on HIGHMEM && !PREEMPT_RT" — already off in
+# Armbian's config, but pin it so a config refresh cannot reintroduce it.
+# CONFIG_HIGHPTE is not set
+
+# NOTE ON threadirqs: do NOT add `threadirqs` to the kernel cmdline on an RT kernel.
+# kernel/irq/manage.c guards that early_param with
+#     #if defined(CONFIG_IRQ_FORCED_THREADING) && !defined(CONFIG_PREEMPT_RT)
+# so under PREEMPT_RT the parameter is not registered at all and forced threading is
+# unconditional. Passing it is a no-op that would mislead us into thinking we had
+# changed something.

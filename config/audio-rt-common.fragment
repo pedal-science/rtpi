@@ -1,0 +1,64 @@
+# Low-latency audio deltas common to both boards.
+# Applied with scripts/kconfig/merge_config.sh on top of the base config.
+#
+# Rationale per symbol — the point is worst-case latency, not throughput. One late
+# buffer is one audible xrun, so the maximum matters and the mean does not.
+
+# --- Preemption -------------------------------------------------------------------
+# The whole point. Converts most spinlocks to priority-inheriting rt_mutexes and makes
+# nearly all IRQ handlers threaded, which compresses the long tail of the latency
+# distribution. Mean latency may be slightly WORSE under RT; the 99.99th percentile is
+# dramatically better, and that is what causes xruns.
+CONFIG_PREEMPT_RT=y
+
+# --- Timer resolution -------------------------------------------------------------
+# 1000Hz gives 1ms scheduling granularity. At 48kHz a 64-frame period is 1.33ms, so a
+# 250Hz tick (4ms) cannot service small buffers reliably.
+CONFIG_HZ_1000=y
+CONFIG_HZ=1000
+CONFIG_HIGH_RES_TIMERS=y
+
+# --- Scheduler ---------------------------------------------------------------------
+# RT_GROUP_SCHED puts RT tasks into cgroup bandwidth groups. With it on, JACK/PipeWire
+# threads can be throttled or refused SCHED_FIFO in ways that are painful to debug.
+# Ubuntu's own realtime flavour disables it; so do we.
+# CONFIG_RT_GROUP_SCHED is not set
+
+# --- Debug instrumentation that costs latency --------------------------------------
+# These add work to the scheduler and context-switch paths — exactly where RT cares.
+# CONFIG_DEBUG_PREEMPT is not set
+# CONFIG_LATENCYTOP is not set
+# CONFIG_PROVE_LOCKING is not set
+# CONFIG_DEBUG_ATOMIC_SLEEP is not set
+
+# --- Tracers: KEEP THESE ON --------------------------------------------------------
+# Deliberately divergent from the github.com/by/RT-Kernel guide, which disables FTRACE.
+# That guide targets an NTP server. We need osnoise/timerlat because `rtla` is how we
+# attribute a latency spike to a specific IRQ or thread — disabling FTRACE would delete
+# the only tool that can explain a failure. The compiled-in cost is small and constant;
+# not being able to diagnose a spike is not.
+CONFIG_FTRACE=y
+CONFIG_FUNCTION_TRACER=y
+CONFIG_OSNOISE_TRACER=y
+CONFIG_TIMERLAT_TRACER=y
+CONFIG_HWLAT_TRACER=y
+
+# --- CPU frequency -----------------------------------------------------------------
+# DVFS transitions during audio processing are a direct jitter source. Pin to
+# performance at boot; it can still be changed at runtime.
+CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y
+
+# --- Sound -------------------------------------------------------------------------
+# Both boards use class-compliant USB audio. Built in rather than modular so it is
+# available early and cannot be delayed by module loading.
+CONFIG_SND=y
+CONFIG_SND_USB_AUDIO=y
+CONFIG_SND_HRTIMER=y
+# snd-aloop and snd-dummy are used by the test harness when no loopback cable is fitted.
+CONFIG_SND_ALOOP=m
+CONFIG_SND_DUMMY=m
+
+# --- Watchdog observability --------------------------------------------------------
+# Without this, /sys/class/watchdog/watchdog0/{state,timeout,bootstatus} do not exist and
+# we cannot verify the watchdog is actually armed. It is off in Armbian's config.
+CONFIG_WATCHDOG_SYSFS=y

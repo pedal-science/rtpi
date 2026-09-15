@@ -1,0 +1,87 @@
+#!/bin/sh
+# piboot-validate — decides whether a candidate kernel is promoted to current/.
+#
+# Exit 0  => new/ is promoted to current/ (and current/ demoted to old/).
+# Exit !0 => new/ is marked "bad" and the machine reboots back to the known-good kernel.
+#
+# WHY THIS FILE MATTERS
+# The stock version of this hook is literally `true`. Combined with
+# piboot-try-validate.service having no network dependency, that means a kernel which
+# reaches multi-user.target but has NO WORKING NETWORK is marked good and promoted
+# permanently — losing remote access to a machine we only reach over ssh. That is the
+# single most likely way this project could lock us out, so this hook is not optional.
+#
+# DESIGN TENSION (the stock file's own comments warn about it): test too little and a
+# broken kernel gets promoted; test too much and a transient failure — a slow DHCP
+# server, an audio device not yet enumerated — marks a perfectly good kernel bad and
+# rolls it back. We resolve it by testing only things whose absence would actually cost
+# us access or invalidate the experiment, and by retrying the racy ones.
+
+set -u
+
+log() { echo "piboot-validate: $*" >&2; }
+fail() { log "FAIL: $*"; exit 1; }
+
+# --- 1. sshd must be listening. Without this we lose the box. ---------------------
+# Retry: sshd may still be starting when this unit runs.
+i=0
+while [ "$i" -lt 30 ]; do
+    if ss -H -tln 2>/dev/null | grep -qE '(^|[^0-9.])[0-9.:*]*:22[[:space:]]'; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+[ "$i" -lt 30 ] || fail "sshd is not listening on port 22 after 30s"
+log "sshd is listening"
+
+# --- 2. At least one interface must have a routable address. ----------------------
+# NOTE: test ANY interface, not eth0 specifically. On piv, eth0 is NO-CARRIER and wlan0
+# carries everything — a hook hard-coded to eth0 would roll back every good kernel.
+i=0
+addr=""
+while [ "$i" -lt 45 ]; do
+    addr=$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $2" "$4}' | head -1)
+    [ -n "$addr" ] && break
+    i=$((i + 1))
+    sleep 1
+done
+[ -n "$addr" ] || fail "no interface has a global IPv4 address after 45s"
+log "network address present: $addr"
+
+# --- 3. The running kernel must be the one we meant to test. ----------------------
+# Guards against a mis-staged candidate silently validating the old kernel.
+if [ -r /etc/rtpi-expected-kernel ]; then
+    expected=$(cat /etc/rtpi-expected-kernel)
+    running=$(uname -r)
+    [ "$running" = "$expected" ] \
+        || fail "running kernel '$running' != expected '$expected'"
+    log "kernel version matches: $running"
+fi
+
+# --- 4. If we expected a realtime kernel, it must actually BE realtime. -----------
+# Detection: /sys/kernel/realtime DOES NOT EXIST on mainline — it was an out-of-tree
+# RT-patch artifact that was never merged (absent from kernel/ksysfs.c). The reliable
+# test is the version banner, confirmed against Ubuntu's own raspi-realtime image:
+#   "#17-Ubuntu SMP PREEMPT_RT Fri Aug  7 17:41:11 UTC 2026"
+if [ -e /etc/rtpi-expect-realtime ]; then
+    uname -v | grep -q 'PREEMPT_RT' \
+        || fail "expected a PREEMPT_RT kernel but uname -v is: $(uname -v)"
+    log "PREEMPT_RT confirmed active"
+fi
+
+# --- 5. The audio device under test should be present. ----------------------------
+# Deliberately NON-fatal: a USB interface that is unplugged, asleep or slow to enumerate
+# must not cost us an otherwise-good kernel. We only warn, because losing audio is
+# recoverable over ssh whereas losing the network is not.
+if [ -r /etc/rtpi-audio-usb-id ]; then
+    audio_id=$(cat /etc/rtpi-audio-usb-id)
+    if lsusb 2>/dev/null | grep -qi "$audio_id"; then
+        log "audio device $audio_id enumerated"
+    else
+        log "WARNING: audio device $audio_id not found (not treated as failure)"
+    fi
+fi
+
+log "all checks passed — promoting candidate"
+exit 0
