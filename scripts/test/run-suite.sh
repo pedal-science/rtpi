@@ -94,6 +94,20 @@ echo "audio_cards=$(tr '\n' '|' < /proc/asound/cards 2>/dev/null | sed 's/  */ /
 # the answer is no, which is a property of the kernel worth recording next to the numbers.
 if chrt -f 50 true 2>/dev/null; then echo "sched_fifo_in_cgroup=true"; else echo "sched_fifo_in_cgroup=false"; fi
 echo "uptime_s=$(cut -d' ' -f1 /proc/uptime)"
+# Thermal state, because on 2026-09-15 this board hit its 90C critical trip mid-suite and
+# the kernel did a HARDWARE PROTECTION shutdown. It idles at 67C with passive throttling
+# trips at 70C and 75C, so a sustained run crosses both early and measures a THROTTLED
+# machine. A latency number recorded without the temperature that produced it is not
+# comparable to one recorded at a different temperature.
+for z in /sys/class/thermal/thermal_zone*; do
+  [ -e "$z" ] || continue
+  echo "thermal_$(cat $z/type 2>/dev/null)_start_mC=$(cat $z/temp 2>/dev/null)"
+done
+for t in /sys/class/thermal/thermal_zone0/trip_point_*_temp; do
+  [ -e "$t" ] || continue
+  n=$(basename "$t" | sed 's/_temp//')
+  echo "trip_${n}_$(cat /sys/class/thermal/thermal_zone0/${n}_type 2>/dev/null)_mC=$(cat $t)"
+done
 REMOTE
 sed 's/^/    /' "$RAW_DIR/facts.txt" >&2
 
@@ -153,6 +167,19 @@ if [ "$WITH_LOAD" = "1" ]; then
   sleep 3   # let the load reach steady state before measuring
 fi
 
+# Sample thermals for the duration, self-terminating so a dropped connection cannot
+# leave it running.
+( end=\$(( \$(date +%s) + $DURATION + 20 ))
+  peak=0; minfreq=99999999
+  while [ \$(date +%s) -lt \$end ]; do
+    t=\$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 0)
+    f=\$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo 0)
+    [ "\$t" -gt "\$peak" ] 2>/dev/null && peak=\$t
+    [ "\$f" -gt 0 ] && [ "\$f" -lt "\$minfreq" ] 2>/dev/null && minfreq=\$f
+    echo "peak_mC=\$peak min_khz=\$minfreq last_mC=\$t last_khz=\$f" > /tmp/rtpi-therm-$FRAMES
+    sleep 5
+  done ) &
+
 # Two things are load-bearing in this invocation.
 #
 # 1. --histogram/--histfile gives the percentile data; without it cyclictest reports only
@@ -181,6 +208,11 @@ exec timeout -s INT ${GRACE}s cyclictest \\
 sudo chmod 0644 "$RJSON" "$RHIST" 2>/dev/null || true
 cleanup
 REMOTE
+
+  # Peak temperature and minimum CPU frequency seen during the run. Throttling is the
+  # thing that silently invalidates a comparison, so record it rather than hoping.
+  dev_ssh "cat /tmp/rtpi-therm-${FRAMES} 2>/dev/null" > "$RAW_DIR/thermal-${FRAMES}.txt" || true
+  dev_ssh "sudo rm -f /tmp/rtpi-therm-${FRAMES}" || true
 
   dev_ssh "cat $RJSON 2>/dev/null" > "$RAW_DIR/cyclictest-${FRAMES}.json" || true
   dev_ssh "cat $RHIST 2>/dev/null" > "$RAW_DIR/cyclictest-${FRAMES}.hist" || true
