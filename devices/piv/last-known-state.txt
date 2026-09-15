@@ -1,0 +1,35 @@
+=== piv ===
+running kernel : 7.0.0-1017-raspi-realtime
+version banner : #17-Ubuntu SMP PREEMPT_RT Fri Aug  7 17:41:11 UTC 2026
+realtime       : YES (PREEMPT_RT)
+uptime         : up 2 minutes
+
+--- A/B slots ---
+  current  state=good     kernel=Linux version 7.0.0-1017-raspi-realtime
+  new      (absent)
+  old      state=good     kernel=Linux version 7.0.0-1017-raspi
+
+--- tryboot ---
+  this boot is a tryboot: 1
+--- piboot-try ---
+  (silent above == stable: nothing staged, nothing pending)
+
+--- watchdog ---
+WatchdogDevice=/dev/watchdog0
+RuntimeWatchdogUSec=14s
+--- boot partition space ---
+/dev/sda1       505M  228M  277M  46% /boot/firmware
+--- package holds ---
+  dracut
+  dracut-core
+  dracut-install
+  dracut-network
+  initramfs-tools-core
+  linux-image-raspi
+  linux-raspi
+  piboot-try
+=== rollback availability ===
+linux-image-7.0.0-1017-raspi 7.0.0-1017.17
+linux-image-7.0.0-1017-raspi-realtime 7.0.0-1017.17
+--- old/ slot holds ---
+Linux version 7.0.0-1017-raspi
