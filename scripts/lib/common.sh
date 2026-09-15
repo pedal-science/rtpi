@@ -33,6 +33,36 @@ load_device() {
   : "${SSH_HOST:?device.env must set SSH_HOST}"
 }
 
+# --- Reaching the device on more than one path -------------------------------------
+# A board with two working interfaces is only safer if the TOOLING can use both. tib's
+# hostname resolves to its wlan0 address, so a stock `ssh tib` reaches the board over wifi
+# only -- and the whole reason we tolerate the dwmac-rk rewrite risk is that wlan0 is an
+# independent path if ethernet breaks. That argument fails unless we can also reach the
+# board when the reverse happens, so scripts try every known address.
+
+# ssh_hosts — ordered list of addresses for the loaded device, primary first.
+ssh_hosts() {
+  local -a hosts=("$SSH_HOST")
+  if [[ -n ${SSH_HOST_ALT:-} ]]; then
+    local -a alts
+    read -ra alts <<< "$SSH_HOST_ALT"
+    hosts+=("${alts[@]}")
+  fi
+  printf '%s\n' "${hosts[@]}"
+}
+
+# live_host — echo the first address that answers; non-zero if none do.
+live_host() {
+  local h
+  while IFS= read -r h; do
+    [[ -n $h ]] || continue
+    if ssh "${SSH_OPTS[@]}" -o ConnectTimeout=4 "$h" true >/dev/null 2>&1; then
+      printf '%s' "$h"; return 0
+    fi
+  done < <(ssh_hosts)
+  return 1
+}
+
 # dev_ssh <cmd...> — run a command on the loaded device.
 dev_ssh() { ssh "${SSH_OPTS[@]}" "$SSH_HOST" "$@"; }
 
@@ -40,10 +70,21 @@ dev_ssh() { ssh "${SSH_OPTS[@]}" "$SSH_HOST" "$@"; }
 dev_ssh_quiet() { ssh "${SSH_OPTS[@]}" "$SSH_HOST" "$@" >/dev/null 2>&1; }
 
 # require_ssh — fail early and clearly rather than half-way through a risky sequence.
+# On failure over the primary address, fall back to the alternates and KEEP the working
+# one for the rest of the run, so a single dead interface does not abort the session.
 require_ssh() {
-  dev_ssh_quiet true \
-    || die "cannot ssh to $SSH_HOST. If the 1Password agent is locked, unlock it
-         (check with: ssh-add -l)."
+  dev_ssh_quiet true && return 0
+
+  local alt
+  if alt=$(live_host); then
+    warn "primary address $SSH_HOST did not answer; using $alt instead"
+    warn "that means one of this board's interfaces is down — check before doing anything risky"
+    SSH_HOST="$alt"
+    return 0
+  fi
+
+  die "cannot ssh to $SSH_HOST (or any alternate: ${SSH_HOST_ALT:-none}).
+         If the 1Password agent is locked, unlock it (check with: ssh-add -l)."
 }
 
 # --- Safety guards -----------------------------------------------------------------

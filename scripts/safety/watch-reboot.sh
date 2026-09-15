@@ -31,12 +31,29 @@ done
 
 load_device "$DEVICE"
 
-probe() { ssh "${SSH_OPTS[@]}" -o ConnectTimeout=4 "$SSH_HOST" 'uname -r' 2>/dev/null; }
+# Probe EVERY known address, not just the primary. After a risky boot the interface we
+# normally use may be the one that broke -- which is exactly the case this tool exists to
+# detect. Reporting "never came back" when the board is up and reachable on its other
+# address would be the worst possible failure mode for this script.
+LAST_PATH=""
+probe() {
+  local h out
+  while IFS= read -r h; do
+    [[ -n $h ]] || continue
+    out=$(ssh "${SSH_OPTS[@]}" -o ConnectTimeout=4 "$h" 'uname -r' 2>/dev/null) || continue
+    [[ -n $out ]] || continue
+    LAST_PATH="$h"
+    printf '%s' "$out"
+    return 0
+  done < <(ssh_hosts)
+  return 1
+}
 
 start=$(date +%s)
 elapsed() { echo $(( $(date +%s) - start )); }
 
 log "watching $SSH_HOST (timeout ${TIMEOUT}s, settle ${SETTLE}s)"
+log "paths: $(ssh_hosts | tr '\n' ' ')"
 [[ -n $EXPECT ]] && log "expecting kernel: $EXPECT"
 
 # Phase 1: wait for it to go away. If it never does, the reboot was not triggered.
@@ -55,11 +72,20 @@ while (( $(elapsed) < TIMEOUT )); do
   if kernel=$(probe) && [[ -n $kernel ]]; then
     now=$(date +%s)
     if [[ $kernel != "$last_seen" ]]; then
-      log "up, running: $kernel (t+$(elapsed)s)"
+      log "up, running: $kernel (t+$(elapsed)s) — answered on $LAST_PATH"
       last_seen="$kernel"
       stable_since=$now
     elif (( now - stable_since >= SETTLE )); then
-      ok "settled on $kernel after $(elapsed)s"
+      ok "settled on $kernel after $(elapsed)s (reachable on $LAST_PATH)"
+      # Which paths came back matters as much as which kernel did: a candidate that boots
+      # but loses an interface is a partial failure worth seeing, not a clean pass.
+      for h in $(ssh_hosts); do
+        if ssh "${SSH_OPTS[@]}" -o ConnectTimeout=4 "$h" true >/dev/null 2>&1; then
+          ok "  path up:   $h"
+        else
+          warn "  path DOWN: $h"
+        fi
+      done
       if [[ -z $EXPECT ]]; then
         echo "$kernel"; exit 0
       elif [[ $kernel == "$EXPECT" ]]; then
