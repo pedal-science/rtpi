@@ -15,10 +15,12 @@ sources/
 linux/
 linux-*/
 
-# Backups pulled from devices can be large; keep the small text ones only.
-devices/*/backups/*.tar
-devices/*/backups/*.tar.gz
-devices/*/backups/*/
+# Backups pulled from devices. The boot tarballs are hundreds of MB, so those stay
+# local — but the small text artefacts and the U-Boot env image are committed, because
+# they are exactly what you want in front of you during a recovery, and a 32KB env image
+# is the difference between restoring tib and re-imaging it.
+devices/*/backups/**/*.tar
+devices/*/backups/**/*.tar.gz
 
 # Local scratch
 .DS_Store

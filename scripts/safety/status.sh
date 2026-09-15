@@ -19,7 +19,7 @@ case "$DEVICE" in
                printf '  %-8s ' \$d
                if sudo test -d $BOOT_MOUNT/\$d; then
                  printf 'state=%-8s ' \"\$(sudo cat $BOOT_MOUNT/\$d/state 2>/dev/null || echo '?')\"
-                 printf 'kernel=%s\n' \"\$(sudo strings -a $BOOT_MOUNT/\$d/vmlinuz 2>/dev/null | grep -m1 -oE 'Linux version [0-9][^ ]*' || echo '?')\"
+                 printf 'kernel=%s\n' \"\$(sudo zcat -f $BOOT_MOUNT/\$d/vmlinuz 2>/dev/null | strings -a 2>/dev/null | grep -m1 -oE 'Linux version [0-9][^ ]*' || echo '?')\"
                else
                  echo '(absent)'
                fi
@@ -29,7 +29,7 @@ case "$DEVICE" in
     dev_ssh "printf '  this boot is a tryboot: '; od -An -tu4 --endian=big /proc/device-tree/chosen/bootloader/tryboot | tr -d ' '"
     echo "--- piboot-try ---"
     dev_ssh "sudo piboot-try --status 2>&1 || true"
-    echo "  (no output above == stable, nothing pending)"
+    echo "  (silent above == stable: nothing staged, nothing pending)"
     echo
     echo "--- watchdog ---"
     dev_ssh "systemctl show | grep -E 'RuntimeWatchdogUSec|WatchdogDevice'"

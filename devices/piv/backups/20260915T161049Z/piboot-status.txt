@@ -1,0 +1,5 @@
+
+piboot-try:
+Untested boot assets present in /boot/firmware/new. Next boot will
+double-boot; use piboot-try --reboot to reboot and test new assets
+immediately without double-booting

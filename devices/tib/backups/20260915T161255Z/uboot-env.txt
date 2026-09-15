@@ -1,0 +1,8 @@
+image size      : 32768 bytes
+stored CRC32    : 0x00000000
+computed CRC32  : 0xb52d2b04
+STATUS          : EMPTY — U-Boot has never saved an environment.
+
+  U-Boot is running on its compiled-in default environment.
+  DO NOT run fw_setenv against this. Run `saveenv` once at the U-Boot
+  serial console first, which persists the complete current environment.
