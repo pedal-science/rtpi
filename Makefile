@@ -9,6 +9,7 @@ SHELL := /usr/bin/env bash
 IMAGE   := rtpi-build:latest
 VOLUME  := rtpi-src
 CCACHE  := rtpi-ccache
+SCRIPTS := scripts
 
 .PHONY: help
 help: ## Show this help
@@ -34,6 +35,31 @@ image: colima-up ## Build the arm64 build container
 shell: image ## Interactive shell in the build container
 	docker run --rm -it -v $(VOLUME):/src -v $(CCACHE):/ccache \
 	  -v "$(PWD)":/rtpi:ro $(IMAGE) /bin/bash
+
+## tib bring-up — run in this order on a fresh Armbian install
+
+.PHONY: tib-freeze-good
+tib-freeze-good: ## 1. Freeze the running kernel as the known-good fallback
+	$(SCRIPTS)/deploy/tib-freeze-good.sh
+
+.PHONY: tib-bootscr
+tib-bootscr: ## 2. Install the one-shot boot script (reboot after, to bootstrap the env)
+	$(SCRIPTS)/deploy/tib-install-bootscr.sh
+
+.PHONY: tib-validate-service
+tib-validate-service: ## 3. Install the candidate-boot validate service
+	$(SCRIPTS)/deploy/tib-install-validate.sh
+
+.PHONY: tib-install-rt
+tib-install-rt: ## 4. Install a built kernel into the candidate slot
+	$(SCRIPTS)/deploy/tib-install-rt.sh
+
+.PHONY: tib-try
+tib-try: ## 5. Arm the one-shot and reboot into the candidate, watching the result
+	@REL=$$(cat build/tib/kernelrelease 2>/dev/null); \
+	  [ -n "$$REL" ] || { echo "no build/tib/kernelrelease — build first"; exit 1; }; \
+	  ssh tib 'sudo /usr/bin/fw_setenv rt_try 1 && sudo systemctl reboot' || true; \
+	  $(SCRIPTS)/safety/watch-reboot.sh tib --expect "$$REL"
 
 ## Safety — run these before and around anything risky
 .PHONY: backup-piv backup-tib
@@ -91,7 +117,7 @@ piv-ubuntu-rt: image ## Build an audio-tuned RT kernel from Ubuntu linux-raspi s
 	scripts/build/piv-ubuntu-rt.sh
 piv-vendor-rt: image ## Build an RT kernel from the raspberrypi/linux tree
 	scripts/build/piv-vendor-rt.sh
-tib-rt: image ## Build an RT kernel for tib (Armbian edge 7.2.6+, no patches needed)
+tib-rt: image ## Build an RT kernel for tib (mainline 7.2.6 + patches/tib)
 	scripts/build/tib-rt.sh
 
 ## Tests

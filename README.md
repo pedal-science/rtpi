@@ -66,6 +66,68 @@ symlinks (which Armbian's postinst keeps pointing at the newest kernel), and the
 **known-good** is a frozen copy we make (`*-good`). So a routine Armbian kernel upgrade
 can never silently become the default boot.
 
+## tib bring-up from a fresh Armbian install
+
+Every step below is a script in this repo. Run them in this order; each one refuses to
+proceed if the previous one has not been done.
+
+```bash
+make colima-up && make image          # build environment (6 CPU / 8G on a 16G Mac)
+
+make tib-freeze-good                  # 1. freeze the running stock kernel as the fallback
+make tib-bootscr                      # 2. install the one-shot boot script
+ssh tib 'sudo systemctl reboot'       #    reboot once: rtpi region 1 bootstraps the U-Boot env
+make status-tib                       #    must report VALID before any fw_setenv
+ssh tib 'sudo apt-get install -y libubootenv-tool'
+make tib-validate-service             # 3. install the candidate-boot validate service
+
+make tib-rt                           # 4. build mainline 7.2.6 + patches/tib + RT fragments
+make tib-install-rt                   #    stage it into the candidate slot
+make tib-try                          # 5. arm the one-shot, reboot, watch the result
+```
+
+If it comes back on the candidate and you are happy with it, make it permanent:
+
+```bash
+make tib-freeze-good                  # promote: the candidate becomes the new known-good
+```
+
+Promotion is deliberate and separate on purpose. A candidate that passes validation is
+still a one-shot — the next reboot returns to the frozen slot — so nothing becomes the
+default until you say so.
+
+### What each piece contributes, and what breaks without it
+
+| step | without it |
+|---|---|
+| freeze-good | nothing to fall back to; a bad kernel is permanent |
+| bootscr | the `-good` files are inert; Armbian's postinst decides what boots |
+| env bootstrap | `fw_setenv` writes a one-variable environment and kills `bootcmd` |
+| validate service | a candidate that boots without network sits there unreachable |
+| `patches/tib/` | SDIO wifi never enumerates on 7.2.6 — the board has no network |
+| RT fragments | no `PREEMPT_RT`; and with `RT_GROUP_SCHED` left on, no `SCHED_FIFO` at all |
+
+### Testing
+
+```bash
+make test-tib                         # or, to match the recorded results exactly:
+./scripts/test/run-suite.sh tib --duration 300 --periods "64 128 256" \
+    --governor performance --max-freq 1416000 --label "..."
+./scripts/test/report.sh --board tib
+```
+
+**Always cap the clock for sustained runs.** This board cannot hold 1.8GHz: an uncapped
+15-minute suite drove it into the 90C critical trip and the kernel shut it down mid-run.
+1416MHz holds at 72-76C and, more importantly, is reproducible — uncapped, thermal
+throttling means every run measures a different machine.
+
+### What is NOT captured in this repo
+
+- The Armbian install itself. Start from a working Armbian image on a card the board boots
+  from, with networking configured. See the card-compatibility note in RECOVERY.
+- `/etc/fw_env.config`, written by `tib-install-bootscr.sh`'s follow-up step above.
+- Anything about `piv`, which uses an entirely different mechanism (`tryboot`).
+
 ## Things that will bite you
 
 ### `unattended-upgrades` re-runs flash-kernel behind your back

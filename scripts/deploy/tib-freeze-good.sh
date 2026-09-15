@@ -102,5 +102,16 @@ echo "  contains $BOARD_DTB: yes"
 REMOTE
 
 ok "frozen $RUNNING as the known-good slot"
-log "the stock boot.scr does not reference these files, so nothing about this boot changed."
-log "next: install boot.scr, then reboot once to bootstrap the U-Boot environment."
+
+# What to say next depends on whether our boot script is actually in charge yet. Telling
+# someone to install boot.scr when it has been running for hours is worse than saying
+# nothing -- it invites them to redo a step and doubt a working setup.
+if dev_ssh "sudo grep -a -q rtpi $BOOT_SCRIPT_BIN" 2>/dev/null; then
+  ok "the one-shot boot script is installed, so this slot IS the default boot from now on"
+  log "verify with a plain reboot (no arming):"
+  log "    ssh $SSH_HOST 'sudo systemctl reboot' && ./scripts/safety/watch-reboot.sh tib --expect $RUNNING"
+else
+  log "the stock boot.scr does not reference these files, so nothing about this boot changed."
+  log "next: install boot.scr, then reboot once to bootstrap the U-Boot environment:"
+  log "    scripts/deploy/tib-install-bootscr.sh"
+fi
