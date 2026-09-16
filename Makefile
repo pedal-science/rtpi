@@ -112,6 +112,27 @@ rehearse-piv-failure: ## Prove automatic fallback works with a deliberately brok
 piv-apt-rt: ## Install Ubuntu's linux-raspi-realtime on piv via the tryboot path
 	scripts/deploy/piv-apt-rt.sh
 
+## piv audio tuning — the runtime half is safe to apply any time; the boot half reboots
+.PHONY: piv-audio-tune
+piv-audio-tune: ## 1. Install + apply IRQ pinning and priority (runtime only, reverts on reboot)
+	scripts/deploy/piv-audio-tune.sh --apply-now
+
+.PHONY: piv-audio-boot-args
+piv-audio-boot-args: ## 2. Stage the running kernel with CPU isolation and try it via tryboot
+	@REL=$$(ssh piv uname -r); \
+	  echo "staging $$REL as a candidate with AUDIO_TUNING_ARGS"; \
+	  ssh piv "sudo flash-kernel $$REL" && \
+	  scripts/safety/arm-try-piv.sh --expect "$$REL" --realtime --audio-tuning --reboot && \
+	  scripts/safety/watch-reboot.sh piv --expect "$$REL"
+
+.PHONY: piv-audio-status
+piv-audio-status: ## Show whether the audio tuning is actually in force on piv
+	@ssh piv 'echo "cmdline tuning : $$(grep -o "isolcpus=[^ ]*" /proc/cmdline || echo NONE)"; \
+	          echo "isolated cpus  : $$(cat /sys/devices/system/cpu/isolated)"; \
+	          echo "nohz_full cpus : $$(cat /sys/devices/system/cpu/nohz_full)"; \
+	          grep -E "xhci-hcd:usb2" /proc/interrupts; \
+	          ps -eLo tid,psr,cls,rtprio,comm= | grep "irq/.*xhci-hcd:usb2"'
+
 .PHONY: piv-ubuntu-rt piv-vendor-rt tib-rt
 piv-ubuntu-rt: image ## Build an audio-tuned RT kernel from Ubuntu linux-raspi source
 	scripts/build/piv-ubuntu-rt.sh

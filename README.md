@@ -128,6 +128,115 @@ throttling means every run measures a different machine.
 - `/etc/fw_env.config`, written by `tib-install-bootscr.sh`'s follow-up step above.
 - Anything about `piv`, which uses an entirely different mechanism (`tryboot`).
 
+## piv low-latency audio tuning
+
+piv already runs Ubuntu's `linux-raspi-realtime`. Canonical's config is genuinely good
+(PREEMPT_RT, HZ_1000, NO_HZ_FULL, RCU_BOOST, `RT_GROUP_SCHED` off, debug options off,
+osnoise/timerlat left on so `rtla` works), so **there is very little a custom rebuild of
+that source could change**. The measurable win is on the kernel command line and at
+runtime instead. See "Is a custom kernel worth building for piv?" below.
+
+The profile has two halves, installed separately and on purpose:
+
+```bash
+make piv-audio-tune       # runtime: IRQ pinning + priority. Reverts on reboot.
+make piv-audio-boot-args  # boot: CPU isolation. Goes through tryboot.
+make piv-audio-status     # is it actually in force?
+```
+
+| half | what it does | risk | rollback |
+|---|---|---|---|
+| runtime (`rtpi-audio-tune`) | pins the audio interrupt to a reserved core, raises its thread to SCHED_FIFO 85 | none — changes nothing that boots | power cycle |
+| boot (`AUDIO_TUNING_ARGS`) | `isolcpus` / `nohz_full` / `rcu_nocbs` on cores 2-3, `irqaffinity` to 0-1, `skew_tick` | can stop the machine booting | tryboot one-shot, same as a bad kernel |
+
+Install the runtime half first. It is the part you can test immediately and undo with a
+power cycle, so it is how you find out whether this board's interrupt controller honours
+affinity **before** committing to a reboot with changed boot arguments.
+
+The boot half stages the *same kernel* as the candidate and changes only the command
+line. That is a deliberately clean experiment: the one difference between candidate and
+known-good is the arguments, so a failure to come back is unambiguously the arguments.
+
+### Measured effect
+
+60s per period under `stress-ng --cpu 4 --io 2 --vm 1` + hackbench, 48 kHz periods:
+
+| | p99 | p99.9 | p99.99 | max | audio-core avg |
+|---|---|---|---|---|---|
+| 64 fr untuned | 52 | 74 | 94 | 138 | 11.0 / 12.3 |
+| 64 fr tuned | **24** | **47** | **75** | **92** | **3.9 / 4.6** |
+| 128 fr untuned | 58 | 81 | 101 | 115 | 13.5 / 12.9 |
+| 128 fr tuned | **26** | **46** | **74** | 168 | **4.8 / 4.7** |
+| 256 fr untuned | 65 | 88 | 108 | 129 | 14.4 / 13.4 |
+| 256 fr tuned | **32** | **58** | **83** | **90** | **5.6 / 5.6** |
+
+Percentiles roughly halve at every period, and average latency on the reserved cores
+drops about 2.5-3x. Read the one number that got worse honestly: the 168us at 128 frames
+is a **single** event on cpu0, a housekeeping core, whose whole distribution is otherwise
+far better than the untuned run. Cores 0-1 now absorb every interrupt AND all the load
+that can no longer spread onto 2-3, so the worst outlier moving there is the tuning
+working, not failing. Maxima are rare events and 60s under-samples them; the percentiles,
+drawn from 45k-180k samples per core, are the robust comparison.
+
+### Pin your audio threads, or you get none of this
+
+`isolcpus` reserves cores 2-3; it does not put anything on them. Nothing migrates there
+by itself, so an unpinned JACK or PipeWire process runs on the busy housekeeping cores
+and sees the *worse* numbers. Pin explicitly:
+
+```bash
+taskset -c 2,3 jackd -R -P 80 -d alsa -d hw:2 -r 48000 -p 64 -n 2
+```
+
+### Interrupt numbers are not stable on this board; names are
+
+`/etc/rtpi/audio-tune.conf` matches the audio interrupt by name (`xhci-hcd:usb2`), never
+by number. The numbers are allocated in probe order under `rp1_irq_chip`: across the
+single reboot that installed this profile the audio interrupt moved from **138 to 139**.
+A config pinning "IRQ 138" would have silently pinned an unrelated device, and would have
+looked like it worked.
+
+### You cannot `taskset` an interrupt thread, and you should not try
+
+Interrupt threads carry `PF_NO_SETAFFINITY`; `taskset` on one fails with *"affinity
+cannot be set due to PF_NO_SETAFFINITY flag set"*. The kernel owns their placement and
+ties it to the interrupt's own affinity, so writing `/proc/irq/N/smp_affinity_list` is the
+entire job. The thread's `Cpus_allowed_list` may still read as every CPU; that is normal.
+
+### An affinity change only takes effect at the next interrupt
+
+Write `smp_affinity_list` on an idle device and `/proc/interrupts` keeps showing every
+count against the old core — indistinguishable from the write having failed. For an
+edge-triggered interrupt the move is queued and performed from the handler. Generate
+traffic before concluding anything:
+
+```bash
+arecord -D hw:2,0 -f S32_LE -r 48000 -c 8 -d 5 /dev/null
+```
+
+(The SSL 2+ Mk II presents 8 capture / 6 playback channels at a 125us packet interval;
+`-c 2` fails with *"Channels count non available"*.)
+
+### Is a custom kernel worth building for piv?
+
+Probably not, and the config audit is why. Everything that normally justifies a custom RT
+build is already set the way you would set it, and the remaining levers are not free wins:
+
+| lever | state on `7.0.0-1017-raspi-realtime` |
+|---|---|
+| `PREEMPT_RT`, `PREEMPT_LAZY`, `HZ=1000`, `RCU_BOOST`, `HIGH_RES_TIMERS` | already on |
+| `RT_GROUP_SCHED` | already off (unlike Armbian on tib) |
+| `DEBUG_PREEMPT`, `PROVE_LOCKING`, `SCHED_DEBUG`, `SLUB_DEBUG_ON`, `KASAN` | already off |
+| `NO_HZ_FULL`, `RCU_NOCB_CPU` | already on — activated by *command line*, not a rebuild |
+| `TRANSPARENT_HUGEPAGE`, `NUMA_BALANCING` | not built at all; nothing to disable |
+| `FUNCTION_TRACER` | on, but `DYNAMIC_FTRACE` means nops until used — and `rtla` needs it |
+| `ARM64_MTE` | dead code on a Cortex-A76 (ARMv8.2, MTE is v8.5) |
+| `STACKPROTECTOR_STRONG`, `RANDOMIZE_BASE` | small cost, but removing them is a security decision |
+
+A rebuild is worth it for something you cannot get any other way — an out-of-tree patch,
+or a different page size for large DSP working sets (`CONFIG_ARM64_4K_PAGES` is what
+Ubuntu ships). It is not worth it to re-set options that are already set.
+
 ## Things that will bite you
 
 ### `unattended-upgrades` re-runs flash-kernel behind your back
@@ -466,8 +575,16 @@ Source is Format 1.0: `.orig.tar.gz` + `.diff.gz`, no `.debian.tar.xz`. Config c
 **tib** — ARM32 PREEMPT_RT became available in mainline **v7.1** (commit `c6e61c06d606`,
 *"ARM: 9463/1: Allow to enable RT"*). Three follow-up fixes missed 7.2 but landed in
 stable **v7.2.6**; verified by bisecting stable tags —
-`HAVE_POSIX_CPU_TIMERS_TASK_WORK` is absent in v7.2…v7.2.5 and present in v7.2.6. Armbian's
-`edge` branch tracks `branch:linux-7.2.y`, so **no patches are needed**.
+`HAVE_POSIX_CPU_TIMERS_TASK_WORK` is absent in v7.2…v7.2.5 and present in v7.2.6.
+
+One board patch **is** required, in `patches/tib/`: mainline's `rk3288-tinker.dtsi` gives
+the wifi `mmc-pwrseq-simple` node no `post-power-on-delay-ms`, which defaults to 0. The
+8723ds is then probed before its power rail has settled and SDIO enumerates nothing, so
+the board boots with no network at all. A 20ms delay fixes it. `scripts/build/tib-rt.sh`
+applies everything in `patches/tib/` and then asserts the property is present in the
+BUILT dtb — checking the source is not enough, because a patch applied to a `.dtsi` the
+board's `.dtb` does not include would pass every other check and still ship a kernel with
+no network.
 
 The real regression risk moving tib from 6.18 to 7.2 is not the device tree
 (`rk3288-tinker-s.dts` is byte-identical between v6.18.52 and v7.2.6) but

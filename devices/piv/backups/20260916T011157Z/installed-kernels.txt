@@ -1,0 +1,7 @@
+ii  linux-image-6.8.0-1064-raspi                        6.8.0-1064.68                               arm64        Linux kernel image for version 6.8.0 on ARMv8 SMP
+ii  linux-image-7.0.0-1017-raspi                        7.0.0-1017.17                               arm64        Linux kernel image for version 7.0.0
+ii  linux-image-7.0.0-1017-raspi-realtime               7.0.0-1017.17                               arm64        Linux kernel image for version 7.0.0
+ii  linux-image-raspi-realtime                          7.0.0-1017.17                               arm64        Raspberry Pi real-time Linux kernel image
+ii  linux-modules-6.8.0-1064-raspi                      6.8.0-1064.68                               arm64        Linux kernel modules for version 6.8.0 on ARMv8 SMP
+ii  linux-modules-7.0.0-1017-raspi                      7.0.0-1017.17                               arm64        Linux kernel modules for version 7.0.0
+ii  linux-modules-7.0.0-1017-raspi-realtime             7.0.0-1017.17                               arm64        Linux kernel modules for version 7.0.0

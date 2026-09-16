@@ -1,0 +1,19 @@
+[Unit]
+Description=rtpi low-latency audio tuning (IRQ affinity and priority)
+Documentation=file:/etc/rtpi/audio-tune.conf
+# Sound devices have to be enumerated before there is an interrupt to pin.
+After=multi-user.target sound.target
+# Deliberately NOT ordered before anything. This is an optimisation; nothing should wait
+# on it, and nothing should fail if it is slow.
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/rtpi-audio-tune
+# The script exits 0 even when it could not do everything, so a warning does not mark the
+# unit failed. Read the warnings with: systemctl status rtpi-audio-tune
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

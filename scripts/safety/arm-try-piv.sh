@@ -12,7 +12,12 @@
 # We deliberately do NOT put these args in current/cmdline.txt: the known-good kernel
 # should keep its normal, debuggable behaviour.
 #
-# Usage: arm-try-piv.sh --expect <kernel-release> [--realtime] [--reboot]
+# Usage: arm-try-piv.sh --expect <kernel-release> [--realtime] [--audio-tuning] [--reboot]
+#
+# --audio-tuning additionally appends AUDIO_TUNING_ARGS from device.env (CPU isolation,
+# nohz_full, IRQ steering). Those go through the same one-shot path as a kernel, which is
+# the point: a set of boot arguments that does not come back is just as effective a way to
+# lose a machine as a bad kernel, and deserves the same rollback.
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
@@ -21,11 +26,13 @@ load_device piv
 EXPECT=""
 REALTIME=0
 DO_REBOOT=0
+AUDIO_TUNING=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --expect)   EXPECT="$2"; shift 2 ;;
-    --realtime) REALTIME=1; shift ;;
-    --reboot)   DO_REBOOT=1; shift ;;
+    --expect)       EXPECT="$2"; shift 2 ;;
+    --realtime)     REALTIME=1; shift ;;
+    --audio-tuning) AUDIO_TUNING=1; shift ;;
+    --reboot)       DO_REBOOT=1; shift ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -76,10 +83,23 @@ ok "candidate has vmlinuz and $dtb_count dtb(s)"
 # Write the candidate cmdline: inherited known-good args + our safety args.
 log "writing safety args into $CANDIDATE_SLOT/cmdline.txt"
 base=$(dev_ssh "sudo cat $BOOT_MOUNT/$CANDIDATE_SLOT/cmdline.txt")
-# Strip any previously-added args so re-arming is idempotent.
+# Strip any previously-added args so re-arming is idempotent. The audio arguments are
+# stripped here too, so arming WITHOUT --audio-tuning genuinely removes them rather than
+# leaving a stale set behind from an earlier attempt -- otherwise "arm it untuned to get a
+# clean comparison" would silently measure a tuned kernel.
 cleaned=$(printf '%s' "$base" | tr ' ' '\n' \
-  | grep -vE '^(rd\.shell|rd\.emergency|rd\.retry|rd\.timeout|panic)=' | tr '\n' ' ')
+  | grep -vE '^(rd\.shell|rd\.emergency|rd\.retry|rd\.timeout|panic)=' \
+  | grep -vE '^(isolcpus|nohz_full|rcu_nocbs|irqaffinity|skew_tick)=' | tr '\n' ' ')
 newcmdline="$(printf '%s %s %s' "${cleaned% }" "$DRACUT_SAFETY_ARGS" "$PANIC_ARGS")"
+
+if (( AUDIO_TUNING )); then
+  [[ -n ${AUDIO_TUNING_ARGS:-} ]] \
+    || die "--audio-tuning given but AUDIO_TUNING_ARGS is not set in devices/piv/device.env"
+  newcmdline="$newcmdline $AUDIO_TUNING_ARGS"
+  ok "audio tuning args appended: $AUDIO_TUNING_ARGS"
+else
+  log "no audio tuning args (pass --audio-tuning to include them)"
+fi
 dev_ssh "printf '%s\n' \"$newcmdline\" | sudo tee $BOOT_MOUNT/$CANDIDATE_SLOT/cmdline.txt >/dev/null"
 ok "candidate cmdline: $newcmdline"
 

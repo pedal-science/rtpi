@@ -1,0 +1,11 @@
+# Re-apply audio tuning when the USB interface is plugged in.
+#
+# rtpi-audio-tune pins an interrupt that only exists while the interface is attached, so
+# the boot-time run is not enough on its own: unplug and replug the SSL 2+ and the tuning
+# is gone until something re-applies it. Hot-plugging an audio interface is a completely
+# normal thing to do, and silently losing the tuning when you do it is the kind of bug
+# that shows up much later as "why is it worse today than it was yesterday".
+#
+# --no-block because udev serialises rule processing and must not wait on a unit start.
+ACTION=="add", SUBSYSTEM=="usb", ENV{ID_VENDOR_ID}=="31e9", ENV{ID_MODEL_ID}=="0009", \
+  TAG+="systemd", RUN+="/usr/bin/systemctl restart --no-block rtpi-audio-tune.service"

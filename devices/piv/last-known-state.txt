@@ -2,12 +2,12 @@
 running kernel : 7.0.0-1017-raspi-realtime
 version banner : #17-Ubuntu SMP PREEMPT_RT Fri Aug  7 17:41:11 UTC 2026
 realtime       : YES (PREEMPT_RT)
-uptime         : up 2 minutes
+uptime         : up 25 minutes
 
 --- A/B slots ---
   current  state=good     kernel=Linux version 7.0.0-1017-raspi-realtime
   new      (absent)
-  old      state=good     kernel=Linux version 7.0.0-1017-raspi
+  old      state=good     kernel=Linux version 7.0.0-1017-raspi-realtime
 
 --- tryboot ---
   this boot is a tryboot: 1
@@ -18,7 +18,7 @@ uptime         : up 2 minutes
 WatchdogDevice=/dev/watchdog0
 RuntimeWatchdogUSec=14s
 --- boot partition space ---
-/dev/sda1       505M  228M  277M  46% /boot/firmware
+/dev/sda1       505M  226M  279M  45% /boot/firmware
 --- package holds ---
   dracut
   dracut-core
@@ -28,8 +28,10 @@ RuntimeWatchdogUSec=14s
   linux-image-raspi
   linux-raspi
   piboot-try
-=== rollback availability ===
-linux-image-7.0.0-1017-raspi 7.0.0-1017.17
-linux-image-7.0.0-1017-raspi-realtime 7.0.0-1017.17
---- old/ slot holds ---
-Linux version 7.0.0-1017-raspi
+
+=== audio tuning ===
+cmdline tuning : isolcpus=managed_irq,domain,2-3
+isolated cpus  : 2-3
+nohz_full cpus : 2-3
+139:        225          0          0          0 rp1_irq_chip  36 Edge      xhci-hcd:usb2
+    369   1  FF     85 irq/139-xhci-hcd:usb2

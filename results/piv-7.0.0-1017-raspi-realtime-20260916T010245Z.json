@@ -1,0 +1,69 @@
+{
+  "audio_cards": " 0 [Dummy ]: Dummy - Dummy| Dummy 1| 1 [Loopback ]: Loopback - Loopback| Loopback 1| 2 [II ]: USB-Audio - SSL 2+ Mk II| Solid State Logic SSL 2+ Mk II at usb-xhci-hcd.1-1, high speed| 3 [vc4hdmi0 ]: vc4-hdmi - vc4-hdmi-0| vc4-hdmi-0| 4 [vc4hdmi1 ]: vc4-hdmi - vc4-hdmi-1| vc4-hdmi-1|",
+  "board": "piv",
+  "config_hash": "sha256:234925cc89f03bd6a9b44eb0ac5910bdd39d3fc9d9288632a7759f82851d2220",
+  "cyclictest": {
+    "128": {
+      "avg_us": 13,
+      "duration_s": 60,
+      "histogram_overflows": 0,
+      "interval_us": 2666,
+      "max_us": 115,
+      "min_us": 1,
+      "p50_us": 10,
+      "p99_99_us": 101,
+      "p99_9_us": 81,
+      "p99_us": 58,
+      "period_frames": 128,
+      "samples": 90021
+    },
+    "256": {
+      "avg_us": 14,
+      "duration_s": 60,
+      "histogram_overflows": 0,
+      "interval_us": 5333,
+      "max_us": 129,
+      "min_us": 2,
+      "p50_us": 10,
+      "p99_99_us": 108,
+      "p99_9_us": 88,
+      "p99_us": 65,
+      "period_frames": 256,
+      "samples": 44953
+    },
+    "64": {
+      "avg_us": 12,
+      "duration_s": 60,
+      "histogram_overflows": 0,
+      "interval_us": 1333,
+      "max_us": 138,
+      "min_us": 1,
+      "p50_us": 8,
+      "p99_99_us": 94,
+      "p99_9_us": 74,
+      "p99_us": 52,
+      "period_frames": 64,
+      "samples": 179991
+    }
+  },
+  "kernel": "7.0.0-1017-raspi-realtime",
+  "kernel_version": "#17-Ubuntu SMP PREEMPT_RT Fri Aug  7 17:41:11 UTC 2026",
+  "label": "apt RT kernel, untuned baseline (no isolcpus, all IRQs on CPU0)",
+  "load": "stress-ng --cpu 4 --io 2 --vm 1 --vm-bytes 128M + hackbench",
+  "realtime": true,
+  "timestamp": "20260916T010245Z",
+  "tunables": {
+    "cpuinfo_max_khz": "2400000",
+    "governor": "performance",
+    "hz": "1000",
+    "no_hz_full": "y",
+    "nproc": "4",
+    "rcu_boost": "y",
+    "rt_group_sched": "n",
+    "rt_period_us": "1000000",
+    "rt_runtime_us": "950000",
+    "scaling_max_khz": "2400000",
+    "sched_fifo_in_cgroup": "true",
+    "watchdog": "14s"
+  }
+}

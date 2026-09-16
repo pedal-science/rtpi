@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# rtpi-audio-tune — runtime side of piv's low-latency audio setup.
+#
+# The kernel command line reserves cores (isolcpus/nohz_full/rcu_nocbs) and keeps general
+# interrupts off them (irqaffinity). That part needs a reboot and is handled by
+# arm-try-piv.sh. This script does the part that must happen at runtime, because it
+# depends on device enumeration that has not happened yet at the time the command line is
+# parsed:
+#
+#   1. pin the audio controller's interrupt to a reserved core, and
+#   2. raise that interrupt thread's realtime priority above the other IRQ threads.
+#
+# WHY THIS IS WORTH DOING, measured on this board:
+# With every interrupt on CPU0, a cyclictest run under load gave max latencies of
+# 138/108/100/105us on cpu0..3. CPU0 -- the core carrying the interrupts -- was reliably
+# the worst. Moving the audio interrupt to a reserved core takes the audio path off the
+# busiest core AND out of contention with the storage controller's interrupt.
+#
+# SAFETY
+# Everything here is runtime-only and reverts on reboot. It changes no boot asset and
+# cannot cost you access to the machine. If a step cannot be done, it says so and carries
+# on rather than failing the boot.
+
+set -u
+
+CONF=/etc/rtpi/audio-tune.conf
+[[ -r $CONF ]] || { echo "rtpi-audio-tune: $CONF not readable" >&2; exit 1; }
+# shellcheck source=/dev/null
+source "$CONF"
+
+: "${AUDIO_IRQ_NAME:?not set in $CONF}"
+: "${AUDIO_IRQ_CPU:?not set in $CONF}"
+: "${AUDIO_IRQ_PRIO:?not set in $CONF}"
+: "${ISOLATED_CPUS:?not set in $CONF}"
+
+rc=0
+say()  { echo "rtpi-audio-tune: $*"; }
+warn() { echo "rtpi-audio-tune: WARNING: $*" >&2; rc=1; }
+
+# ---------------------------------------------------------------- sanity: did the boot
+# arguments actually take? The runtime pinning below is still worth doing without them,
+# but the big win comes from the cores actually being reserved, and a silent mismatch
+# between this file and the command line is exactly the kind of thing that makes a
+# measurement irreproducible. So check and report rather than assume.
+actual_isolated=$(cat /sys/devices/system/cpu/isolated 2>/dev/null)
+if [[ -z $actual_isolated ]]; then
+  warn "no CPUs are isolated (expected '$ISOLATED_CPUS').
+         The kernel command line is missing isolcpus=. Runtime pinning will still be
+         applied, but the reserved cores are NOT reserved. Check: cat /proc/cmdline"
+elif [[ $actual_isolated != "$ISOLATED_CPUS" ]]; then
+  warn "isolated CPUs are '$actual_isolated' but $CONF says '$ISOLATED_CPUS'.
+         These must agree. Fix AUDIO_TUNING_ARGS in device.env or this file."
+else
+  say "isolated CPUs: $actual_isolated (matches $CONF)"
+fi
+
+nohz=$(cat /sys/devices/system/cpu/nohz_full 2>/dev/null)
+[[ -n $nohz && $nohz != "(null)" ]] && say "nohz_full CPUs: $nohz" \
+  || say "nohz_full: not active (the tick still runs on the reserved cores)"
+
+# ---------------------------------------------------------------- find the audio IRQ
+# Match on the name in the last column of /proc/interrupts, not on a number. See the long
+# comment in audio-tune.conf: IRQ numbers are probe-order dependent on this board and
+# pinning a stale number would quietly pin the wrong device.
+mapfile -t irqs < <(awk -v name="$AUDIO_IRQ_NAME" \
+  '$NF == name { sub(/:$/, "", $1); print $1 }' /proc/interrupts)
+
+if (( ${#irqs[@]} == 0 )); then
+  warn "no interrupt named '$AUDIO_IRQ_NAME' in /proc/interrupts.
+         Is the interface plugged in? Current xhci interrupts:
+$(grep -E 'xhci' /proc/interrupts | sed 's/^/           /')"
+  exit "$rc"
+fi
+if (( ${#irqs[@]} > 1 )); then
+  warn "'$AUDIO_IRQ_NAME' matches ${#irqs[@]} interrupts (${irqs[*]}); using the first.
+         Make AUDIO_IRQ_NAME more specific if that is the wrong one."
+fi
+IRQ="${irqs[0]}"
+say "audio interrupt '$AUDIO_IRQ_NAME' is IRQ $IRQ"
+
+# ---------------------------------------------------------------- pin it
+# Read back and confirm. Not every interrupt controller honours a write here -- an
+# interrupt with no per-CPU routing accepts the write and keeps delivering to the same
+# core. Reporting "pinned" without checking would be a lie that is very hard to notice.
+before=$(cat "/proc/irq/$IRQ/smp_affinity_list" 2>/dev/null)
+if echo "$AUDIO_IRQ_CPU" > "/proc/irq/$IRQ/smp_affinity_list" 2>/dev/null; then
+  after=$(cat "/proc/irq/$IRQ/smp_affinity_list" 2>/dev/null)
+  if [[ $after == "$AUDIO_IRQ_CPU" ]]; then
+    say "IRQ $IRQ affinity $before -> $after"
+  else
+    warn "IRQ $IRQ affinity write accepted but read back as '$after', wanted '$AUDIO_IRQ_CPU'.
+         This interrupt controller may not support per-CPU routing."
+  fi
+else
+  warn "could not write /proc/irq/$IRQ/smp_affinity_list (affinity left at '$before')."
+fi
+
+# ---------------------------------------------------------------- raise its thread
+# Under PREEMPT_RT the hard interrupt handler does almost nothing and the work happens in
+# a kthread called irq/<N>-<name>. Its priority is what actually decides whether audio
+# data beats other devices, so that is what we raise.
+tid=$(ps -eLo tid,comm= 2>/dev/null | awk -v p="irq/$IRQ-" '$2 ~ "^"p { print $1; exit }')
+if [[ -z ${tid:-} ]]; then
+  warn "no irq/$IRQ-* kernel thread found. Threaded interrupts are expected under
+         PREEMPT_RT; on a non-RT kernel there is no thread to prioritise and that is
+         normal."
+else
+  oldprio=$(chrt -p "$tid" 2>/dev/null | awk '/priority/ { print $NF }' | tail -1)
+  if chrt -f -p "$AUDIO_IRQ_PRIO" "$tid" 2>/dev/null; then
+    say "irq thread $tid (irq/$IRQ-$AUDIO_IRQ_NAME) SCHED_FIFO ${oldprio:-?} -> $AUDIO_IRQ_PRIO"
+  else
+    warn "could not set priority on irq thread $tid"
+  fi
+  # Deliberately NOT taskset'ing this thread.
+  #
+  # Interrupt threads carry PF_NO_SETAFFINITY, so sched_setaffinity on one fails with
+  # EINVAL and taskset reports "affinity cannot be set due to PF_NO_SETAFFINITY flag set".
+  # That is by design: the kernel owns an interrupt thread's placement and keeps it tied to
+  # the interrupt's own affinity. Setting /proc/irq/N/smp_affinity_list above is therefore
+  # the whole job -- the thread follows, and there is nothing here to work around.
+  #
+  # Its Cpus_allowed_list may still read as every CPU. That is normal and not a failure:
+  # the thread is woken on whichever core took the interrupt, and with that core reserved
+  # and the thread at SCHED_FIFO $AUDIO_IRQ_PRIO nothing pulls it elsewhere.
+  allowed=$(grep Cpus_allowed_list "/proc/$tid/status" 2>/dev/null | cut -f2)
+  say "irq thread $tid allowed CPUs: ${allowed:-unknown} (kernel-managed, follows the IRQ)"
+fi
+
+# ---------------------------------------------------------------- where does it land?
+# The affinity write above takes effect at the NEXT interrupt, not immediately: for an
+# edge-triggered interrupt the move is queued and performed from the handler. So a
+# freshly-tuned idle machine still shows every count against the old core, which looks
+# exactly like the pinning having failed.
+#
+# Report the live distribution and say which it is, rather than leaving a reader to guess.
+# Bound the scan by the real CPU count taken from the header row. Scanning "every numeric
+# field" instead picks up the chip's hwirq number from the trailing columns
+# ("rp1_irq_chip  36  Edge") and reports it as a phantom extra CPU.
+ncpu=$(awk 'NR == 1 { print NF; exit }' /proc/interrupts)
+counts=$(awk -v i="$IRQ:" -v n="$ncpu" '$1 == i { for (c = 2; c <= n + 1; c++) printf "cpu%d=%s ", c-2, $c }' /proc/interrupts)
+say "interrupt counts: $counts"
+landed=$(awk -v i="$IRQ:" -v want="$AUDIO_IRQ_CPU" \
+  '$1 == i { n = $(2 + want); print (n + 0 > 0) ? "yes" : "no" }' /proc/interrupts)
+if [[ $landed == yes ]]; then
+  say "confirmed: interrupts are being delivered to CPU $AUDIO_IRQ_CPU"
+else
+  say "no interrupts on CPU $AUDIO_IRQ_CPU yet -- expected while the interface is idle.
+         The move happens on the next interrupt. To confirm, generate some traffic:
+           arecord -D hw:CARD,0 -f S32_LE -r 48000 -c 8 -d 5 /dev/null
+         then re-check: grep '$AUDIO_IRQ_NAME' /proc/interrupts"
+fi
+
+if (( rc == 0 )); then say "done"; else say "done, with warnings"; fi
+# Never fail the boot over a tuning problem: the machine is still usable untuned, and a
+# failed unit here would be far more disruptive than slightly worse latency.
+exit 0
