@@ -72,6 +72,47 @@ for d in runs:
                  s(c.get("p99_9_us")), s(c["max_us"]), pct, peak_temp(d, k)))
     print()
 
+# ---------------------------------------------------------------- tuning head-to-head
+# Same board, same KERNEL, differing only in CPU isolation. This is the comparison piv
+# needs and the RT-vs-non-RT one below cannot express: on piv the kernel never changes,
+# only the command line does, so keying on kernel release finds nothing to compare.
+#
+# Ranked on p99.9 rather than max. Max is a single rare event -- across these runs one
+# 182us outlier on a housekeeping core sat inside a distribution that was better than the
+# baseline at every percentile -- so ranking a tuning change on max alone reports noise as
+# a regression. Max is still printed, because for audio it is the number that decides
+# whether you get an xrun; it is just not what the ratio is computed from.
+# Group by DURATION as well as board and kernel. A longer run sees rarer events, so its
+# max is higher for reasons that have nothing to do with the change under test -- pairing
+# a 300s run against a 60s one would report the extra sampling as a regression. Only
+# compare runs that sampled for the same length of time.
+def run_duration(d):
+    ds = {c.get("duration_s") for c in d["cyclictest"].values()}
+    return ds.pop() if len(ds) == 1 else None
+
+tune = {}
+for d in runs:
+    iso = d["tunables"].get("isolated_cpus", "unknown")
+    dur = run_duration(d)
+    if iso == "unknown" or dur is None:
+        continue
+    tune.setdefault((d["board"], d["kernel"], dur), {}).setdefault(bool(iso), []).append(d)
+
+for (bd, kern, dur), g in sorted(tune.items(), key=lambda kv: kv[0][2]):
+    if True not in g or False not in g:
+        continue
+    off, on = g[False][-1], g[True][-1]
+    print("TUNING HEAD TO HEAD  %s  %s  (%ss per period)" % (bd, kern, dur))
+    print("  isolated cpus: none  ->  %s" % on["tunables"]["isolated_cpus"])
+    print("  %-7s %-22s %-22s %s" % ("frames", "untuned p99.9/max", "tuned p99.9/max", "p99.9 gain"))
+    for k in sorted(set(off["cyclictest"]) & set(on["cyclictest"]), key=int):
+        a, b = off["cyclictest"][k], on["cyclictest"][k]
+        pa, pb = a.get("p99_9_us"), b.get("p99_9_us")
+        gain = "%.1fx" % (pa / pb) if pa and pb else "-"
+        print("  %-7s %-22s %-22s %s"
+              % (k, "%sus / %sus" % (pa, a["max_us"]), "%sus / %sus" % (pb, b["max_us"]), gain))
+    print()
+
 # Head-to-head on the most comparable pair: same board, same governor and cap.
 by = {}
 for d in runs:

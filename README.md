@@ -176,7 +176,20 @@ is a **single** event on cpu0, a housekeeping core, whose whole distribution is 
 far better than the untuned run. Cores 0-1 now absorb every interrupt AND all the load
 that can no longer spread onto 2-3, so the worst outlier moving there is the tuning
 working, not failing. Maxima are rare events and 60s under-samples them; the percentiles,
-drawn from 45k-180k samples per core, are the robust comparison.
+drawn from 45k-180k samples per core, are the robust comparison. `report.sh` therefore
+ranks a tuning change on p99.9 and prints max alongside, rather than ranking on max.
+
+A 300s run of the promoted config (900k/450k/225k samples) gives p99 22/27/31us, p99.9
+42/50/58us, max 126/182/139us — worst case 6.8% of its period budget — holding 2400MHz
+for the full 15 minutes with a 48.5C peak and no throttling at any point. piv has
+thermal headroom that tib does not: trips are at 50/60/67.5/75C with critical at 110C,
+and it idles at 38C.
+
+**Not yet measured: a 300s *untuned* baseline.** The comparison table above is 60s on both
+sides, which is a fair comparison but under-samples maxima. To get the 300s pair, stage a
+candidate without `--audio-tuning`, run the suite, then re-apply. `report.sh` will only
+compare runs of equal duration, so it will not silently pair the 300s tuned run against a
+60s baseline and report the extra sampling as a regression.
 
 ### Pin your audio threads, or you get none of this
 

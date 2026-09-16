@@ -80,6 +80,12 @@ echo "nproc=$(nproc)"
 echo "governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
 echo "scaling_max_khz=$(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq 2>/dev/null || echo unknown)"
 echo "cpuinfo_max_khz=$(cat /sys/devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq 2>/dev/null || echo unknown)"
+# CPU isolation. This is a property of the kernel COMMAND LINE, not of the config, so it
+# cannot be recovered from config_hash -- and on piv it is the single biggest difference
+# between one run and the next, because the kernel is identical and only the arguments
+# change. A run recorded without it cannot be told apart from an untuned one later.
+echo "isolated_cpus=$(cat /sys/devices/system/cpu/isolated 2>/dev/null || echo unknown)"
+echo "nohz_full_cpus=$(cat /sys/devices/system/cpu/nohz_full 2>/dev/null || echo unknown)"
 echo "rt_runtime_us=$(cat /proc/sys/kernel/sched_rt_runtime_us 2>/dev/null || echo unknown)"
 echo "rt_period_us=$(cat /proc/sys/kernel/sched_rt_period_us 2>/dev/null || echo unknown)"
 echo "watchdog=$(systemctl show -p RuntimeWatchdogUSec --value 2>/dev/null || echo unknown)"

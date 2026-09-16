@@ -178,6 +178,10 @@ def main():
             "nproc": facts.get("nproc", "unknown"),
             "hz": facts.get("cfg_CONFIG_HZ", "unknown"),
             "no_hz_full": facts.get("cfg_CONFIG_NO_HZ_FULL", "n"),
+            # Empty string means no cores were reserved. Distinct from "unknown", which
+            # means the run predates this field being recorded.
+            "isolated_cpus": facts.get("isolated_cpus", "unknown"),
+            "nohz_full_cpus": facts.get("nohz_full_cpus", "unknown"),
             "rcu_boost": facts.get("cfg_CONFIG_RCU_BOOST", "n"),
             "rt_group_sched": facts.get("cfg_CONFIG_RT_GROUP_SCHED", "n"),
             # False means SCHED_FIFO is denied outside the root cgroup, so no ordinary
