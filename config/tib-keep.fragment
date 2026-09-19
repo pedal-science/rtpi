@@ -1,0 +1,51 @@
+# Modules that must survive the localmodconfig trim on tib, whether or not the hardware
+# happens to be attached on the day the kernel is built.
+#
+# WHY THIS FILE EXISTS
+# The trim is driven by /proc/modules pulled off the board, which answers "what does this
+# board load today", not "what must this board be able to load". Those differ exactly when
+# it matters: the SSL is on the bench, the wifi is down because you are rebuilding the
+# kernel, and the thing that is missing is the driver you needed to get back in.
+#
+# Merged AFTER localmodconfig, so it wins over the trim. That ordering has one sharp edge:
+# a =m line here would DEMOTE a symbol the base config has =y. Only put =m symbols here,
+# and only ones the base config already has as =m.
+
+# --- SDIO wifi: tib's only network path --------------------------------------------
+# device.env records that end0 sits behind a NATing repeater and SSH_HOST_ALT is empty, so
+# wlan0 is the only way onto this board. If a build runs while the wifi module is not
+# loaded, localmodconfig removes the entire stack and the next boot is unreachable.
+CONFIG_RTW88_8723DS=m
+CONFIG_RTW88_8723D=m
+CONFIG_RTW88_8723X=m
+CONFIG_RTW88_SDIO=m
+CONFIG_RTW88_CORE=m
+CONFIG_MAC80211=m
+CONFIG_CFG80211=m
+
+# --- ALSA loopback and dummy ------------------------------------------------------
+# The soak harness uses these when no loopback cable is fitted, so they are routinely
+# absent from /proc/modules at build time even though the test rig depends on them.
+CONFIG_SND_ALOOP=m
+CONFIG_SND_DUMMY=m
+
+# --- Crypto the wifi stack pulls in ------------------------------------------------
+# Loaded on demand by mac80211/rtw88 rather than at boot, so they can be absent while the
+# interface is down -- the same failure mode as the wifi drivers above.
+CONFIG_CRYPTO_CCM=m
+CONFIG_CRYPTO_GCM=m
+CONFIG_CRYPTO_AES_ARM_BS=m
+CONFIG_CRYPTO_GHASH_ARM_CE=m
+# Hidden, but selected by CCM/GCM rather than prompted, so spell them the way the tree
+# does: there is no CONFIG_CRYPTO_GF128MUL, it is CRYPTO_LIB_GF128MUL (module gf128mul).
+CONFIG_CRYPTO_LIB_GF128MUL=m
+CONFIG_CRYPTO_LIB_GF128HASH=m
+
+# --- USB serial: the out-of-band console -------------------------------------------
+# Not needed to run, but it is the cheapest way back into a headless board whose network
+# has gone, and it costs one small module.
+CONFIG_USB_SERIAL=m
+CONFIG_USB_SERIAL_FTDI_SIO=m
+CONFIG_USB_SERIAL_PL2303=m
+CONFIG_USB_SERIAL_CH341=m
+CONFIG_USB_SERIAL_CP210X=m

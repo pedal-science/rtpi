@@ -42,8 +42,31 @@ CONFIG_EXPERT=y
 # itself. Stated here only so the next person does not go looking for the problem.
 CONFIG_HIGHMEM=y
 
-# NOT set, deliberately: NO_HZ_FULL needs CPUs isolated from the tick to pay for itself,
-# and on a 4-core board running a full desktop-ish Armbian userspace there are none to
-# spare. NO_HZ_IDLE is the right choice here. Revisit only with isolcpus.
-CONFIG_NO_HZ_IDLE=y
-# CONFIG_NO_HZ_FULL is not set
+# NO_HZ_FULL, not NO_HZ_IDLE: they are alternatives, not layers. Both are members of
+# kernel/time/Kconfig's "Timer tick handling" CHOICE, so setting both -- as this fragment
+# used to -- means Kconfig silently keeps one and drops the other. FULL is the one to ask
+# for, because it is the superset: it stops the tick on an idle core AND on a busy core
+# that is running exactly one task. The note that used to be here said the opposite, and
+# measurement has overtaken it (2026-09-17):
+#
+#   * It is available, not absent. The symbol is offered by Kconfig and was merely disabled, and
+#     every prerequisite is already set: CONTEXT_TRACKING, TICK_ONESHOT, HIGH_RES_TIMERS, SMP,
+#     NO_HZ_COMMON, HZ=1000. Nothing about the RK3288 blocks it, and it is enabled the same way
+#     as on piv: CONFIG_NO_HZ_FULL=y plus nohz_full= on the command line.
+#   * It costs 925 timer interrupts per second on the audio core as built -- 554 761 arch_timer
+#     interrupts across a 600 s device arm with the engine pinned to cpu 3, against 0/s on the
+#     Pi with NO_HZ_FULL in force. cpu2 sits at 40/s because tickless idle already stops the
+#     tick on *idle* cores; a busy core is what NO_HZ_FULL adds.
+#   * The old reason -- "a 4-core board running a full desktop-ish userspace has none to spare"
+#     -- assumes no confinement. The engine is pinned to one core and held there by cgroup v2
+#     cpuset confinement, so exactly one core is reserved and three are left. That is a core to
+#     spare for the purpose this option exists.
+#   * It holds only while the isolated core has exactly one runnable task, so it needs the
+#     command line (see devices/tib/boot/boot.cmd) AND the confinement. On the Pi the tick came
+#     back without the latter.
+#
+# Expect little for latency and measure it rather than assume: the quiet device case already
+# passes on this board with the tick running (0 xruns, 0 deadline overruns, p99 36.9 %), and
+# under a memory load the binding constraint is the shared L2 and 2.98 GB/s of bandwidth, which
+# no tick setting touches. This is hygiene for a headless node, not a cure.
+CONFIG_NO_HZ_FULL=y

@@ -48,13 +48,25 @@ for f in "$BOOT_DIR/zImage$GOOD_SLOT_SUFFIX" "$BOOT_DIR/uInitrd$GOOD_SLOT_SUFFIX
 done
 OVL=\$(grep -oP '(?<=^overlays=).*' "$BOOT_ENV_FILE" 2>/dev/null || true)
 PFX=\$(grep -oP '(?<=^overlay_prefix=).*' "$BOOT_ENV_FILE" 2>/dev/null || echo rockchip)
-for o in \$OVL; do
-  f="$BOOT_DIR/dtb$GOOD_SLOT_SUFFIX/overlay/\$PFX-\$o.dtbo"
-  if [ -e "\$f" ]; then echo "    OK      \$f"; else echo "    MISSING \$f"; fail=1; fi
-done
+OVL_DIR="$BOOT_DIR/dtb$GOOD_SLOT_SUFFIX/overlay"
+if [ ! -d "\$OVL_DIR" ]; then
+  # Not fatal, and deliberately so. Mainline's arm tree ships no rockchip overlays -- the
+  # 45 rockchip-*.dtbo files on this board come from Armbian's own tree, which our mainline
+  # build does not have -- so a slot built by us has no overlay/ directory at all. boot.cmd
+  # skips a .dtbo it cannot load rather than failing the boot, and this is the state the
+  # board is booting in right now. The consequence is real and worth stating: the overlays
+  # listed above are NOT applied, so i2c1/i2c4/spi2/spidev2/uart1/uart2 stay as mainline
+  # leaves them. A directory that EXISTS but is missing requested files is still fatal.
+  echo "    WARN    \$OVL_DIR does not exist; overlays [\${OVL}] will not be applied"
+else
+  for o in \$OVL; do
+    f="\$OVL_DIR/\$PFX-\$o.dtbo"
+    if [ -e "\$f" ]; then echo "    OK      \$f"; else echo "    MISSING \$f"; fail=1; fi
+  done
+fi
 exit \$fail
 REMOTE
-ok "known-good slot is complete, including its own overlays"
+ok "known-good slot is complete"
 
 # Belt and braces: the running kernel should be the one we froze, so the slot we are about
 # to make the default is a kernel we have actually seen boot.

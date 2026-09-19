@@ -31,6 +31,17 @@ CONFIG_HIGH_RES_TIMERS=y
 # CONFIG_PROVE_LOCKING is not set
 # CONFIG_DEBUG_ATOMIC_SLEEP is not set
 
+# --- Debug info: do not generate it at all -----------------------------------------
+# Armbian builds DWARF5. INSTALL_MOD_STRIP=1 threw it away at install time, but only after
+# paying to compile it: the module tree came out at 1.1GB, mac80211.ko at 29.3MB against
+# 1.6MB stripped. Turning generation off instead of the output also shrinks the build tree
+# and the build time, and it is strictly better than stripping because there is no window
+# in which a 1.1GB tree exists to be shipped by accident.
+# BTF goes with it: it is generated FROM DWARF, nothing here consumes it (the RT tooling
+# is tracefs-based, not BPF-based), and dropping it removes the pahole post-processing pass.
+CONFIG_DEBUG_INFO_NONE=y
+# CONFIG_DEBUG_INFO_BTF is not set
+
 # --- Tracers: KEEP THESE ON --------------------------------------------------------
 # Deliberately divergent from the github.com/by/RT-Kernel guide, which disables FTRACE.
 # That guide targets an NTP server. We need osnoise/timerlat because `rtla` is how we
@@ -51,6 +62,16 @@ CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y
 # --- Sound -------------------------------------------------------------------------
 # Both boards use class-compliant USB audio. Built in rather than modular so it is
 # available early and cannot be delayed by module loading.
+#
+# CONFIG_SOUND=y IS NOT OPTIONAL WHEN ASKING FOR CONFIG_SND=y. sound/Kconfig nests
+# "menuconfig SND" inside "if SOUND", so SND can never be less modular than SOUND. With
+# SOUND=m (Armbian's value, and this project's base config) olddefconfig silently
+# downgrades every =y request in this section to m: merge_config.sh reports the symbol as
+# applied, olddefconfig exits 0, and the only symptom is a kernel that does not match its
+# own fragment. Measured on the 2026-09-15 tib build, which shipped CONFIG_SND_USB_AUDIO=m
+# from a fragment that had asked for =y since the first commit. tib-rt.sh now asserts the
+# built value instead of trusting the merge.
+CONFIG_SOUND=y
 CONFIG_SND=y
 CONFIG_SND_USB_AUDIO=y
 CONFIG_SND_HRTIMER=y

@@ -153,13 +153,27 @@ fi
 # get PARTUUID of first partition on SD/eMMC the boot script was loaded from
 if test "${devtype}" = "mmc"; then part uuid mmc ${devnum}:1 partuuid; fi
 
+# rtpi: CPU isolation for the audio core. Needed because NO_HZ_FULL is now enabled in
+# config/tib-rt.fragment: it suppresses the tick only while a core has exactly one runnable
+# task, and `isolcpus` is what keeps anything else from being placed there. One core is
+# reserved, not two -- the engine is pinned to cpu 3 and held there by cgroup v2 cpuset
+# confinement, which leaves three cores for housekeeping. That is the answer to the earlier
+# "a 4-core board has no cores to spare" note, which assumed a desktop-ish userspace and no
+# confinement.
+#
+# `managed_irq` keeps driver-steered (multiqueue) interrupts off it; `rcu_nocbs` moves RCU
+# callbacks off, without which the tick is pulled back on and NO_HZ_FULL achieves little.
+# tib has no equivalent of piv's rtpi-audio-tune, and its IRQs default to cpu 0, so no IRQ
+# steering is needed here.
+setenv rtpi_isolarg "isolcpus=managed_irq,domain,3 nohz_full=3 rcu_nocbs=3"
+
 # rtpi: ${rtpi_slotarg} appended. Without it there is no way to tell from userspace which
 # slot actually booted -- and while the two slots hold the same kernel version, as they do
 # immediately after freezing, uname cannot distinguish them at all. That ambiguity would
 # make every rehearsal inconclusive. The kernel ignores unrecognised dotted arguments and
 # passes them to init, so this is inert apart from appearing in /proc/cmdline, which is
 # exactly where we want to read it.
-setenv bootargs "earlyprintk root=${rootdev} rootwait rootfstype=${rootfstype} ${consoleargs} consoleblank=0 loglevel=${verbosity} ubootpart=${partuuid} usb-storage.quirks=${usbstoragequirks} ${rtpi_slotarg} ${extraargs} ${extraboardargs}"
+setenv bootargs "earlyprintk root=${rootdev} rootwait rootfstype=${rootfstype} ${consoleargs} consoleblank=0 loglevel=${verbosity} ubootpart=${partuuid} usb-storage.quirks=${usbstoragequirks} ${rtpi_slotarg} ${rtpi_isolarg} ${extraargs} ${extraboardargs}"
 
 if test "${docker_optimizations}" = "on"; then setenv bootargs "${bootargs} cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory"; fi
 
