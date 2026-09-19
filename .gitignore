@@ -19,7 +19,7 @@
 *.tar.gz
 *.tar.xz
 .DS_Store
-build/
+/build/
 devices/*/backups/**/*.img
 devices/*/backups/**/*.img.zst
 devices/*/backups/**/*.tar
