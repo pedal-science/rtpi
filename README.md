@@ -203,7 +203,7 @@ taskset -c 2,3 jackd -R -P 80 -d alsa -d hw:2 -r 48000 -p 64 -n 2
 
 ### Interrupt numbers are not stable on this board; names are
 
-`/etc/rtpi/audio-tune.conf` matches the audio interrupt by name (`xhci-hcd:usb2`), never
+`/etc/rtpi/audio-tune.conf` matches the audio interrupt by name (`xhci-hcd:usb4` today), never
 by number. The numbers are allocated in probe order under `rp1_irq_chip`: across the
 single reboot that installed this profile the audio interrupt moved from **138 to 139**.
 A config pinning "IRQ 138" would have silently pinned an unrelated device, and would have

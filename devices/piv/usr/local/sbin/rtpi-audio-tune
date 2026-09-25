@@ -59,6 +59,28 @@ nohz=$(cat /sys/devices/system/cpu/nohz_full 2>/dev/null)
   || say "nohz_full: not active (the tick still runs on the reserved cores)"
 
 # ---------------------------------------------------------------- find the audio IRQ
+# Prefer the controller the interface is actually on. The configured name only holds for
+# one port: on 2026-09-25 the SSL 2+ came back on the other xHCI controller (named usb4)
+# and root storage on the one named usb2, and this script went on pinning the disk's
+# interrupt to the audio core. The interface's USB id (/etc/rtpi-audio-usb-id, written by
+# harden-piv.sh) leads through sysfs to its controller, and an xHCI controller's interrupt
+# is named after the lower of its two buses.
+usb_id=$(cat /etc/rtpi-audio-usb-id 2>/dev/null || true)
+if [[ $usb_id == *:* ]]; then
+  for d in /sys/bus/usb/devices/*; do
+    [[ -r $d/idVendor ]] || continue
+    [[ "$(cat "$d/idVendor"):$(cat "$d/idProduct")" == "$usb_id" ]] || continue
+    ctrl=$(readlink -f "$d"); ctrl=${ctrl%%/usb[0-9]*}
+    bus=$(ls -d "$ctrl"/usb[0-9]* 2>/dev/null | sed 's|.*/usb||' | sort -n | head -1)
+    if [[ -n $bus && "xhci-hcd:usb$bus" != "$AUDIO_IRQ_NAME" ]]; then
+      warn "$usb_id is on xhci-hcd:usb$bus, not the configured '$AUDIO_IRQ_NAME'; using usb$bus.
+         Update AUDIO_IRQ_NAME in $CONF, or move the interface back to its usual port."
+    fi
+    [[ -n $bus ]] && AUDIO_IRQ_NAME="xhci-hcd:usb$bus"
+    break
+  done
+fi
+
 # Match on the name in the last column of /proc/interrupts, not on a number. See the long
 # comment in audio-tune.conf: IRQ numbers are probe-order dependent on this board and
 # pinning a stale number would quietly pin the wrong device.
