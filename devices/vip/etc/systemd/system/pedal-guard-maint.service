@@ -1,0 +1,12 @@
+[Unit]
+Description=pedal-guard: a loose boot reached its target, so reset the boot counter
+Documentation=file:///usr/lib/dracut/modules.d/95vip-guard/vip-guard.sh
+ConditionKernelCommandLine=vipboot.root=pedal
+ConditionKernelCommandLine=systemd.unit=pedal-maint.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vip-boot guard-clear
+
+[Install]
+WantedBy=pedal-maint.target

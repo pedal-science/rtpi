@@ -1,0 +1,668 @@
+#!/usr/bin/python3
+"""vip-boot — choose what vip boots: kernel, boot arguments, profile, root.
+
+    vip-boot status
+    vip-boot try-kernel <release> [--no-reboot]   stage /boot/vmlinuz-<release> in the spare slot, boot it once
+    vip-boot try-args '<args>' [--no-reboot]      the running kernel with new tuned arguments, once
+    vip-boot loose [--no-reboot]                  one boot in the loose profile
+    vip-boot default tuned|loose                  the pedal's profile from now on
+    vip-boot default pedal|rescue                 which root boots from now on
+    vip-boot rescue [--stay] [--no-reboot]        boot the rescue root once (or until told otherwise)
+    vip-boot stay                                 from rescue: stay in rescue (= default rescue)
+
+  run by units, not by hand:
+    vip-boot settle          early every boot: a candidate still marked trying on a normal boot failed
+    vip-boot validate        on a candidate boot: check it, then promote it or mark it bad and reboot
+    vip-boot guard-clear     the pedal reached its target: reset the boot counter
+
+  run by the image build (pedal.project), with --dir pointing at the partition's staging directory:
+    vip-boot init-bootsel --dir D
+    vip-boot init-pedal-boot --dir D --kernel-root R --release REL [--config-extra F]
+    vip-boot init-rescue-boot --dir D --kernel-root R --release REL [--config-extra F]
+
+HOW IT WORKS (docs/vip-image.md in pedal.project has the reasons)
+
+The bootloader reads autoboot.txt on partition 1 (bootsel). Its [all] boot_partition is the
+default root's boot partition (2 pedal, 3 rescue); its [tryboot] one is always the pedal's, so the
+one-shot tryboot flag ("0 tryboot") selects the [tryboot] sections of the pedal's config.txt.
+
+The pedal's config.txt is written once and never again. It includes two small files:
+
+    [all]       include profile.txt    os_prefix=<active slot>/ and cmdline=cmdline-<profile>.txt
+    [tryboot]   include tryboot.txt    whatever the next one-shot should change
+
+Kernels live in two fixed slots, a/ and b/. profile.txt names the active one; the other holds the
+previous kernel, or a candidate while one is tried. Promoting a candidate is one rewrite of
+profile.txt, not a rename of directories, so no moment exists at which the card has no kernel to
+boot.
+
+Every file vip-boot changes on the FAT partitions is rewritten IN PLACE AT THE SAME LENGTH, within
+one sector: autoboot.txt differs only in one digit, the others are padded with a comment. A write
+cut short by a power loss then leaves either the old sector or the new one, and never a FAT whose
+allocation changed half-way. That's the property the pedal's fallback leans on.
+
+A one-shot partition switch needs no flag at all: reboot "<N>" boots partition N once
+(bench-results/vip-spike in pedal.project, check 5). That is `vip-boot rescue`.
+
+The pedal's initramfs (dracut module vip-guard) counts boots on bootsel and sends vip to rescue,
+sticky, when GUARD_LIMIT boots in a row never reached `vip-boot guard-clear`. Its file formats
+must match this file's: tests/vip-boot checks that they do.
+
+Paths are overridable for the tests: VIPBOOT_PREFIX is put in front of every absolute path,
+VIPBOOT_NO_MOUNT=1 skips mounting, VIPBOOT_REBOOT names a command run instead of systemctl.
+"""
+import argparse
+import fcntl
+import glob
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+PREFIX = os.environ.get("VIPBOOT_PREFIX", "")
+VALIDATE_HOOK = "/usr/local/libexec/vip-boot-validate"
+
+SMALL = 128      # profile.txt, tryboot.txt: well inside one 512-byte sector
+STATE_W = 32     # <slot>/state
+COUNT_W = 16     # bootsel vipboot/count
+REASON_W = 256   # bootsel vipboot/reason
+
+STATES = ("empty", "staging", "trying", "good", "bad")
+PROFILES = ("tuned", "loose")
+
+
+def p(path):
+    return PREFIX + path
+
+
+def log(msg):
+    print(f"vip-boot: {msg}", file=sys.stderr)
+
+
+def die(msg, code=1):
+    log(msg)
+    sys.exit(code)
+
+
+# ------------------------------------------------------------------ device facts
+
+def read_env(path=None):
+    """device.env: KEY=value or KEY="value" lines, parsed without a shell."""
+    env = {}
+    with open(path or p("/etc/rtpi/device.env")) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            val = val.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                val = val[1:-1]
+            env[key.strip()] = val
+    return env
+
+
+# ------------------------------------------------------------------ file formats
+# The dracut module writes count, reason and autoboot.txt with the same formats: keep in step.
+
+def padded(text, width, comment="#"):
+    """text, then padding to exactly width bytes. For config files the padding is a comment."""
+    body = text if text.endswith("\n") or not text else text + "\n"
+    if comment:
+        room = width - len(body.encode()) - 1
+        if room < 1:
+            raise ValueError(f"{len(body)} bytes of text does not fit in {width}")
+        out = body + comment + " " * (room - 1) + "\n"
+    else:
+        room = width - len(text.encode()) - 1
+        if room < 0:
+            raise ValueError(f"{len(text)} bytes of text does not fit in {width}")
+        out = text + " " * room + "\n"
+    assert len(out.encode()) == width
+    return out
+
+
+def autoboot_text(default_part, pedal_part):
+    if not (str(default_part).isdigit() and len(str(default_part)) == 1 and
+            str(pedal_part).isdigit() and len(str(pedal_part)) == 1):
+        raise ValueError("partition numbers must be single digits, to keep autoboot.txt one length")
+    return (f"[all]\ntryboot_a_b=1\nboot_partition={default_part}\n\n"
+            f"[tryboot]\nboot_partition={pedal_part}\n")
+
+
+def count_text(n):
+    return padded(f"count={n}", COUNT_W, comment=None)
+
+
+def reason_text(reason):
+    reason = " ".join(reason.split())[: REASON_W - 1]
+    return padded(reason, REASON_W, comment=None)
+
+
+def profile_text(slot, profile):
+    return padded(f"os_prefix={slot}/\ncmdline=cmdline-{profile}.txt\n", SMALL)
+
+
+def tryboot_text(line=None):
+    return padded((line + "\n") if line else "# nothing armed\n", SMALL)
+
+
+def state_text(state):
+    assert state in STATES, state
+    return padded(state, STATE_W, comment=None)
+
+
+def write_in_place(path, text):
+    """Overwrite an existing file with text of exactly its length, and sync it."""
+    data = text.encode()
+    size = os.path.getsize(path)
+    if size != len(data):
+        die(f"{path} is {size} bytes, not {len(data)}: refusing to change its length "
+            "(was it made by vip-boot init-*?)")
+    with open(path, "r+b") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def write_new(path, text):
+    """For the image build, and for files inside a slot that isn't booted."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read()
+    except FileNotFoundError:
+        return default
+
+
+def parse_profile(text):
+    slot = profile = None
+    for line in text.splitlines():
+        if line.startswith("os_prefix="):
+            slot = line.split("=", 1)[1].strip().rstrip("/")
+        elif line.startswith("cmdline=cmdline-") and line.endswith(".txt"):
+            profile = line[len("cmdline=cmdline-"):-len(".txt")]
+    return slot, profile
+
+
+def parse_autoboot(text):
+    section, default = None, None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            section = line
+        elif section == "[all]" and line.startswith("boot_partition="):
+            default = line.split("=", 1)[1]
+    return default
+
+
+# ------------------------------------------------------------------ the board
+
+class Board:
+    def __init__(self, env):
+        self.env = env
+        self.bootsel = p(env["BOOTSEL_MOUNT"])
+        self.pedal_boot = p(env["PEDAL_BOOT_MOUNT"])
+        self.slots = env["SLOTS"].split()
+        self.mounted = []
+
+    # --- what booted
+    def bootloader(self, name):
+        try:
+            with open(p("/proc/device-tree/chosen/bootloader/") + name, "rb") as f:
+                raw = f.read()
+        except FileNotFoundError:
+            return None
+        return int.from_bytes(raw[:4], "big") if len(raw) >= 4 else None
+
+    @property
+    def tryboot(self):
+        return self.bootloader("tryboot") == 1
+
+    def marks(self):
+        out = {}
+        for word in read(p("/proc/cmdline")).split():
+            if word.startswith("vipboot.") and "=" in word:
+                k, v = word[len("vipboot."):].split("=", 1)
+                out[k] = v
+        return out
+
+    @property
+    def root(self):
+        return self.marks().get("root", "unknown")
+
+    # --- mounts
+    def mount(self, label_key, where):
+        if os.environ.get("VIPBOOT_NO_MOUNT") == "1" or os.path.ismount(where):
+            return
+        os.makedirs(where, exist_ok=True)
+        r = subprocess.run(["mount", "-o", "rw,noatime", f"LABEL={self.env[label_key]}", where])
+        if r.returncode:
+            die(f"cannot mount LABEL={self.env[label_key]} on {where}")
+        self.mounted.append(where)
+
+    def unmount_all(self):
+        subprocess.run(["sync"])
+        for where in reversed(self.mounted):
+            subprocess.run(["umount", where])
+        self.mounted = []
+
+    def need_bootsel(self):
+        self.mount("BOOTSEL_LABEL", self.bootsel)
+
+    def need_pedal_boot(self):
+        self.mount("PEDAL_BOOT_LABEL", self.pedal_boot)
+
+    # --- the pedal boot partition
+    def profile(self):
+        return parse_profile(read(os.path.join(self.pedal_boot, "profile.txt")))
+
+    def set_profile(self, slot, profile):
+        assert slot in self.slots and profile in PROFILES
+        write_in_place(os.path.join(self.pedal_boot, "profile.txt"), profile_text(slot, profile))
+
+    def arm(self, line):
+        write_in_place(os.path.join(self.pedal_boot, "tryboot.txt"), tryboot_text(line))
+
+    def slot_dir(self, slot):
+        return os.path.join(self.pedal_boot, slot)
+
+    def state(self, slot):
+        s = read(os.path.join(self.slot_dir(slot), "state"), "empty").strip()
+        return s if s in STATES else "empty"
+
+    def set_state(self, slot, state):
+        path = os.path.join(self.slot_dir(slot), "state")
+        if os.path.exists(path) and os.path.getsize(path) == STATE_W:
+            write_in_place(path, state_text(state))
+        else:
+            write_new(path, state_text(state))
+
+    def release(self, slot):
+        return read(os.path.join(self.slot_dir(slot), "kernel.release")).strip()
+
+    def spare(self):
+        active, _ = self.profile()
+        others = [s for s in self.slots if s != active]
+        if active not in self.slots or len(others) != 1:
+            die(f"profile.txt names slot {active!r}; expected one of {self.slots}")
+        return active, others[0]
+
+    # --- bootsel
+    def count(self):
+        text = read(os.path.join(self.bootsel, "vipboot", "count"))
+        try:
+            return int(text.split("=", 1)[1])
+        except (IndexError, ValueError):
+            return 0
+
+    def set_count(self, n):
+        write_in_place(os.path.join(self.bootsel, "vipboot", "count"), count_text(n))
+
+    def reason(self):
+        return read(os.path.join(self.bootsel, "vipboot", "reason")).strip()
+
+    def set_reason(self, reason):
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        write_in_place(os.path.join(self.bootsel, "vipboot", "reason"),
+                       reason_text(f"{stamp} {reason}"))
+
+    def default_root(self):
+        part = parse_autoboot(read(os.path.join(self.bootsel, "autoboot.txt")))
+        return {self.env["PEDAL_BOOT_PART"]: "pedal",
+                self.env["RESCUE_BOOT_PART"]: "rescue"}.get(part, f"partition {part}")
+
+    def set_default_root(self, root):
+        part = self.env["PEDAL_BOOT_PART"] if root == "pedal" else self.env["RESCUE_BOOT_PART"]
+        write_in_place(os.path.join(self.bootsel, "autoboot.txt"),
+                       autoboot_text(part, self.env["PEDAL_BOOT_PART"]))
+
+    # --- reboot
+    def reboot(self, argument=None):
+        self.unmount_all()
+        cmd = os.environ.get("VIPBOOT_REBOOT")
+        if cmd:
+            subprocess.run([cmd] + ([argument] if argument else []), check=True)
+            return
+        args = ["systemctl", "reboot"]
+        if argument:
+            # Not `systemctl reboot "<arg>"`: that is refused as too many arguments.
+            args.append(f"--reboot-argument={argument}")
+        log(f"rebooting{' with ' + repr(argument) if argument else ''}")
+        os.execvp(args[0], args)
+
+
+# ------------------------------------------------------------------ command lines
+
+def cmdline(env, slot, profile, tuned_args):
+    extra = tuned_args if profile == "tuned" else env["LOOSE_ARGS"]
+    words = [f"root=LABEL={env['PEDAL_ROOT_LABEL']}", env["BASE_ARGS"], env["DRACUT_SAFETY_ARGS"],
+             env["PANIC_ARGS"], extra,
+             f"vipboot.root=pedal vipboot.slot={slot} vipboot.profile={profile}"]
+    return " ".join(w for w in words if w) + "\n"
+
+
+def rescue_cmdline(env):
+    words = [f"root=LABEL={env['RESCUE_ROOT_LABEL']}", "ro", env["BASE_ARGS"],
+             env["DRACUT_SAFETY_ARGS"], env["PANIC_ARGS"], "vipboot.root=rescue"]
+    return " ".join(w for w in words if w) + "\n"
+
+
+def copy_kernel(kernel_root, release, dest):
+    """vmlinuz, initrd, the BCM2712 device trees and the overlays of one installed kernel."""
+    k = os.path.join(kernel_root, "boot", f"vmlinuz-{release}")
+    i = os.path.join(kernel_root, "boot", f"initrd.img-{release}")
+    dt = os.path.join(kernel_root, "usr/lib/firmware", release, "device-tree")
+    for f in (k, i, os.path.join(dt, "overlays")):
+        if not os.path.exists(f):
+            die(f"{release} is not installed completely: no {f}")
+    dtbs = glob.glob(os.path.join(dt, "broadcom", "bcm2712*.dtb"))
+    if not dtbs:
+        die(f"no bcm2712 device trees for {release} in {dt}/broadcom")
+    os.makedirs(dest, exist_ok=True)
+    shutil.copyfile(k, os.path.join(dest, "vmlinuz"))
+    shutil.copyfile(i, os.path.join(dest, "initrd.img"))
+    for d in dtbs:
+        shutil.copyfile(d, os.path.join(dest, os.path.basename(d)))
+    shutil.copytree(os.path.join(dt, "overlays"), os.path.join(dest, "overlays"),
+                    dirs_exist_ok=True, copy_function=shutil.copyfile)
+
+
+def fill_slot(board, slot, release, tuned_args, kernel_root="/", from_slot=None):
+    """Make slot hold release, booting with tuned_args. The slot must not be the active one."""
+    d = board.slot_dir(slot)
+    board.set_state(slot, "staging")
+    for entry in os.listdir(d):
+        if entry != "state":
+            path = os.path.join(d, entry)
+            shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+    if from_slot:
+        src = board.slot_dir(from_slot)
+        for entry in os.listdir(src):
+            if entry in ("vmlinuz", "initrd.img", "overlays") or entry.endswith(".dtb"):
+                s = os.path.join(src, entry)
+                if os.path.isdir(s):
+                    shutil.copytree(s, os.path.join(d, entry), copy_function=shutil.copyfile)
+                else:
+                    shutil.copyfile(s, os.path.join(d, entry))
+    else:
+        copy_kernel(p(kernel_root) if kernel_root == "/" else kernel_root, release, d)
+    write_new(os.path.join(d, "kernel.release"), release + "\n")
+    write_new(os.path.join(d, "tuned.args"), tuned_args + "\n")
+    for profile in PROFILES:
+        write_new(os.path.join(d, f"cmdline-{profile}.txt"), cmdline(board.env, slot, profile, tuned_args))
+    subprocess.run(["sync"])
+
+
+# ------------------------------------------------------------------ commands
+
+def cmd_status(board, _args):
+    board.need_bootsel()
+    board.need_pedal_boot()
+    m = board.marks()
+    active, profile = board.profile()
+    print(f"running    root={m.get('root', '?')} slot={m.get('slot', '-')} profile={m.get('profile', '-')} "
+          f"tryboot={int(board.tryboot)} partition={board.bootloader('partition')} kernel={os.uname().release}")
+    print(f"default    root={board.default_root()} slot={active} profile={profile}")
+    for s in board.slots:
+        mark = "*" if s == active else " "
+        print(f"slot {s} {mark}   {board.state(s):8} {board.release(s) or '-'}  {read(os.path.join(board.slot_dir(s), 'tuned.args')).strip()}")
+    armed = [l for l in read(os.path.join(board.pedal_boot, "tryboot.txt")).splitlines()
+             if l and not l.startswith("#")]
+    print(f"one-shot   {' '.join(armed) or 'nothing armed'} (applies only when rebooted with the tryboot flag)")
+    print(f"guard      {board.count()} of {board.env['GUARD_LIMIT']} unguarded boots")
+    if board.reason():
+        print(f"last fall  {board.reason()}")
+
+
+def need_pedal(board):
+    if board.root != "pedal":
+        die(f"this runs on the pedal root; this is {board.root}")
+
+
+def try_candidate(board, args, release, tuned_args, from_active):
+    board.need_pedal_boot()
+    if board.tryboot:
+        die("this boot is itself a tryboot: reboot normally first")
+    active, spare = board.spare()
+    if board.state(active) != "good":
+        die(f"the active slot {active} is {board.state(active)}, not good: refusing to try anything")
+    fill_slot(board, spare, release, tuned_args, from_slot=active if from_active else None)
+    board.set_state(spare, "trying")
+    board.arm(f"os_prefix={spare}/")
+    log(f"slot {spare}: {release}, armed for one boot; validation promotes it, anything else returns to {active}")
+    if not args.no_reboot:
+        board.reboot("0 tryboot")
+
+
+def cmd_try_kernel(board, args):
+    need_pedal(board)
+    try_candidate(board, args, args.release, board.env["AUDIO_TUNING_ARGS"], from_active=False)
+
+
+def cmd_try_args(board, args):
+    need_pedal(board)
+    board.need_pedal_boot()
+    active, _ = board.spare()
+    try_candidate(board, args, board.release(active), " ".join(args.args.split()), from_active=True)
+
+
+def cmd_loose(board, args):
+    need_pedal(board)
+    board.need_pedal_boot()
+    board.arm("cmdline=cmdline-loose.txt")
+    log("armed: one loose boot")
+    if not args.no_reboot:
+        board.reboot("0 tryboot")
+
+
+def cmd_default(board, args):
+    if args.what in PROFILES:
+        board.need_pedal_boot()
+        active, _ = board.spare()
+        board.set_profile(active, args.what)
+        log(f"the pedal boots {args.what} from now on")
+    else:
+        board.need_bootsel()
+        board.set_default_root(args.what)
+        if args.what == "pedal":
+            board.set_count(0)
+        log(f"{args.what} boots from now on")
+    board.unmount_all()
+
+
+def cmd_rescue(board, args):
+    board.need_bootsel()
+    if args.stay:
+        board.set_default_root("rescue")
+    if not args.no_reboot:
+        # A plain reboot lands in rescue once it is the default; otherwise reboot "<N>" boots
+        # partition N once, with no flag and nothing written.
+        board.reboot(None if args.stay else board.env["RESCUE_BOOT_PART"])
+
+
+def cmd_stay(board, _args):
+    board.need_bootsel()
+    board.set_default_root("rescue")
+    log("rescue boots from now on; `vip-boot default pedal` to go back")
+    board.unmount_all()
+
+
+def cmd_settle(board, _args):
+    """On a boot without the tryboot flag, a slot still marked trying is a candidate that never
+    validated: it hung into the watchdog, failed to find its root, lost power, or was rebooted
+    by hand. Mark it bad, so nothing mistakes it for a kernel that works."""
+    if board.tryboot:
+        return
+    board.need_pedal_boot()
+    board.need_bootsel()
+    active, _ = board.profile()
+    for s in board.slots:
+        if s != active and board.state(s) == "trying":
+            board.set_state(s, "bad")
+            board.set_reason(f"candidate {board.release(s)} in slot {s} never validated; "
+                             f"back on {board.release(active)} in slot {active}")
+            log(f"slot {s} ({board.release(s)}) never validated: marked bad")
+    board.arm(None)
+    board.unmount_all()
+
+
+def cmd_validate(board, _args):
+    if not board.tryboot or board.root != "pedal":
+        return
+    board.need_pedal_boot()
+    board.need_bootsel()
+    me = board.marks().get("slot")
+    active, profile = board.profile()
+    if me == active or me not in board.slots or board.state(me) != "trying":
+        return  # a loose one-shot, or nothing to validate
+    release = board.release(me)
+    hook = [p(VALIDATE_HOOK), release]
+    log(f"validating slot {me} ({release}): {' '.join(hook)}")
+    ok = subprocess.run(hook).returncode == 0
+    board.arm(None)
+    if ok:
+        board.set_state(me, "good")
+        board.set_profile(me, profile)
+        board.set_count(0)
+        log(f"slot {me} ({release}) is good and now the default; slot {active} keeps the previous kernel")
+        board.unmount_all()
+    else:
+        board.set_state(me, "bad")
+        board.set_reason(f"candidate {release} in slot {me} failed validation")
+        log(f"slot {me} ({release}) failed validation: back to slot {active}")
+        board.reboot(None)
+
+
+def cmd_guard_clear(board, args):
+    if args.require_unit:
+        deadline = time.time() + args.wait
+        while True:
+            state = subprocess.run(["systemctl", "is-active", args.require_unit],
+                                   capture_output=True, text=True).stdout.strip()
+            if state == "active":
+                break
+            if time.time() > deadline:
+                die(f"{args.require_unit} is {state}: this boot is not counted as good")
+            time.sleep(2)
+    board.need_bootsel()
+    board.set_count(0)
+    board.unmount_all()
+
+
+# ------------------------------------------------------------------ the image build
+
+def cmd_init_bootsel(env, args):
+    d = args.dir
+    os.makedirs(os.path.join(d, "vipboot"), exist_ok=True)
+    write_new(os.path.join(d, "autoboot.txt"), autoboot_text(env["PEDAL_BOOT_PART"], env["PEDAL_BOOT_PART"]))
+    write_new(os.path.join(d, "vipboot", "count"), count_text(0))
+    write_new(os.path.join(d, "vipboot", "reason"), reason_text(""))
+
+
+CONFIG_HEAD = """\
+# The pedal's boot partition. Written once at image build by vip-boot, and never again:
+# vip-boot rewrites profile.txt (the active slot and the default profile) and tryboot.txt
+# (what the next one-shot changes), each in place. See `vip-boot --help`.
+[all]
+include profile.txt
+
+[tryboot]
+include tryboot.txt
+
+[all]
+arm_64bit=1
+kernel=vmlinuz
+initramfs initrd.img followkernel
+dtparam=watchdog=on
+enable_uart=1
+"""
+
+
+def cmd_init_pedal_boot(env, args):
+    d = args.dir
+    os.makedirs(d, exist_ok=True)
+    extra = read(args.config_extra) if args.config_extra else ""
+    write_new(os.path.join(d, "config.txt"), CONFIG_HEAD + ("\n" + extra if extra else ""))
+    first, *others = env["SLOTS"].split()
+    write_new(os.path.join(d, "profile.txt"), profile_text(first, "tuned"))
+    write_new(os.path.join(d, "tryboot.txt"), tryboot_text(None))
+    board = Board(env)
+    board.pedal_boot = d
+    for s in [first] + others:
+        os.makedirs(board.slot_dir(s), exist_ok=True)
+        write_new(os.path.join(board.slot_dir(s), "state"), state_text("empty"))
+    fill_slot(board, first, args.release, env["AUDIO_TUNING_ARGS"], kernel_root=args.kernel_root)
+    board.set_state(first, "good")
+
+
+def cmd_init_rescue_boot(env, args):
+    d = args.dir
+    os.makedirs(d, exist_ok=True)
+    copy_kernel(args.kernel_root, args.release, d)
+    extra = read(args.config_extra) if args.config_extra else ""
+    write_new(os.path.join(d, "config.txt"),
+              "# The rescue root's boot partition. Nothing here changes after the image build.\n"
+              "[all]\narm_64bit=1\nkernel=vmlinuz\ncmdline=cmdline.txt\n"
+              "initramfs initrd.img followkernel\ndtparam=watchdog=on\nenable_uart=1\n"
+              + ("\n" + extra if extra else ""))
+    write_new(os.path.join(d, "cmdline.txt"), rescue_cmdline(env))
+    write_new(os.path.join(d, "kernel.release"), args.release + "\n")
+
+
+# ------------------------------------------------------------------ main
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="vip-boot", description=__doc__.split("\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--env", help="device.env to read (default /etc/rtpi/device.env)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status")
+    s = sub.add_parser("try-kernel"); s.add_argument("release"); s.add_argument("--no-reboot", action="store_true")
+    s = sub.add_parser("try-args"); s.add_argument("args"); s.add_argument("--no-reboot", action="store_true")
+    s = sub.add_parser("loose"); s.add_argument("--no-reboot", action="store_true")
+    s = sub.add_parser("default"); s.add_argument("what", choices=PROFILES + ("pedal", "rescue"))
+    s = sub.add_parser("rescue"); s.add_argument("--stay", action="store_true"); s.add_argument("--no-reboot", action="store_true")
+    sub.add_parser("stay")
+    sub.add_parser("settle")
+    sub.add_parser("validate")
+    s = sub.add_parser("guard-clear")
+    s.add_argument("--require-unit"); s.add_argument("--wait", type=int, default=120)
+    s = sub.add_parser("init-bootsel"); s.add_argument("--dir", required=True)
+    for name in ("init-pedal-boot", "init-rescue-boot"):
+        s = sub.add_parser(name)
+        s.add_argument("--dir", required=True); s.add_argument("--kernel-root", required=True)
+        s.add_argument("--release", required=True); s.add_argument("--config-extra")
+    args = ap.parse_args(argv)
+
+    env = read_env(args.env)
+    if args.cmd.startswith("init-"):
+        {"init-bootsel": cmd_init_bootsel, "init-pedal-boot": cmd_init_pedal_boot,
+         "init-rescue-boot": cmd_init_rescue_boot}[args.cmd](env, args)
+        return
+
+    if args.cmd != "status" and os.geteuid() != 0 and not PREFIX:
+        os.execvp("sudo", ["sudo", sys.argv[0]] + (argv if argv is not None else sys.argv[1:]))
+    lock = open(p("/run/vip-boot.lock"), "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    board = Board(env)
+    try:
+        {"status": cmd_status, "try-kernel": cmd_try_kernel, "try-args": cmd_try_args,
+         "loose": cmd_loose, "default": cmd_default, "rescue": cmd_rescue, "stay": cmd_stay,
+         "settle": cmd_settle, "validate": cmd_validate,
+         "guard-clear": cmd_guard_clear}[args.cmd](board, args)
+    finally:
+        board.unmount_all()
+
+
+if __name__ == "__main__":
+    main()

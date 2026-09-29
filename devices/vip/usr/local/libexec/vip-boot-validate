@@ -1,0 +1,103 @@
+#!/bin/sh
+# vip-boot-validate <expected release> — decides whether a candidate slot is promoted.
+#
+# Run by `vip-boot validate` on a candidate's own boot (tryboot flag set, the slot marked
+# trying). Exit 0 => the slot becomes the default. Exit !0 => it is marked bad and vip reboots
+# to the known-good slot.
+#
+# This is piv's piboot-validate (devices/piv/etc/flash-kernel/), which says why each check is
+# there, with the expectations passed in rather than read from files flash-kernel's world
+# needed: the release comes from the slot, and a release with "realtime" in its name must be
+# PREEMPT_RT. The network check applies to candidates only. For vip's default boot a missing
+# network is healthy (at a gig there is no WiFi), so pedal-guard never looks at it.
+
+set -u
+expected=${1:?usage: vip-boot-validate <expected release>}
+
+log() { echo "vip-boot-validate: $*" >&2; }
+fail() { log "FAIL: $*"; exit 1; }
+
+# --- 1. sshd must be listening. Without this we lose the box. ---------------------
+# Retry: sshd may still be starting when this unit runs.
+i=0
+while [ "$i" -lt 30 ]; do
+    if ss -H -tln 2>/dev/null | grep -qE '(^|[^0-9.])[0-9.:*]*:22[[:space:]]'; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+[ "$i" -lt 30 ] || fail "sshd is not listening on port 22 after 30s"
+log "sshd is listening"
+
+# --- 2. At least one REAL interface must have a routable address. -----------------
+# NOTE: test ANY physical interface, not eth0 specifically. On piv, eth0 is NO-CARRIER and
+# wlan0 carries everything — a hook hard-coded to eth0 would roll back every good kernel.
+#
+# But "any interface with a global address" is too weak, and on this machine it was
+# actively wrong. piv runs libvirt and docker, so virbr0 (192.168.122.1), docker0
+# (172.17.0.1) and a compose bridge all have global-scope IPv4 addresses that exist
+# whether or not the machine has any route to the outside world. They are created by
+# local daemons, not by connectivity. The first boot after the audio tuning went in
+# matched on virbr0 — meaning a candidate kernel whose wifi driver failed completely
+# would still have been validated and PROMOTED, which is precisely the lockout this hook
+# exists to prevent.
+#
+# So: skip interfaces that are locally-created bridges and virtual devices, and require
+# something real to be up.
+is_virtual() {
+    case "$1" in
+        lo|virbr*|docker*|br-*|veth*|vnet*|tun*|tap*|zt*|wg*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+i=0
+addr=""
+while [ "$i" -lt 45 ]; do
+    addr=$(ip -o -4 addr show scope global 2>/dev/null \
+           | while read -r _ ifname _ cidr _; do
+                 is_virtual "$ifname" || { echo "$ifname $cidr"; break; }
+             done)
+    [ -n "$addr" ] && break
+    i=$((i + 1))
+    sleep 1
+done
+if [ -z "$addr" ]; then
+    log "interfaces seen: $(ip -o -4 addr show scope global 2>/dev/null | awk '{print $2"="$4}' | tr '\n' ' ')"
+    fail "no PHYSICAL interface has a global IPv4 address after 45s (virtual bridges do not count)"
+fi
+log "network address present: $addr"
+
+# A default route is not strictly required to reach this box from the same subnet, so its
+# absence is only a warning. It is still worth logging: a candidate that comes up with an
+# address but no route is a partially-broken network stack, and seeing that in the journal
+# turns a confusing "ssh works from here but not from there" into an obvious one.
+route=$(ip -4 route show default 2>/dev/null | head -1)
+if [ -n "$route" ]; then
+    log "default route: $route"
+else
+    log "WARNING: no default IPv4 route (reachable on-subnet only)"
+fi
+
+# --- 3. The running kernel must be the one we meant to test. ----------------------
+# Guards against a mis-staged candidate silently validating the old kernel.
+running=$(uname -r)
+[ "$running" = "$expected" ] \
+    || fail "running kernel '$running' != expected '$expected'"
+log "kernel version matches: $running"
+
+# --- 4. If we expected a realtime kernel, it must actually BE realtime. -----------
+# Detection: /sys/kernel/realtime DOES NOT EXIST on mainline — it was an out-of-tree
+# RT-patch artifact that was never merged (absent from kernel/ksysfs.c). The reliable
+# test is the version banner, confirmed against Ubuntu's own raspi-realtime image:
+#   "#17-Ubuntu SMP PREEMPT_RT Fri Aug  7 17:41:11 UTC 2026"
+case "$expected" in *realtime*|*-rt*)
+    uname -v | grep -q 'PREEMPT_RT' \
+        || fail "expected a PREEMPT_RT kernel but uname -v is: $(uname -v)"
+    log "PREEMPT_RT confirmed active"
+    ;;
+esac
+
+log "all checks passed — promoting the candidate"
+exit 0

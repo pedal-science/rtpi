@@ -1,0 +1,13 @@
+[Unit]
+Description=vip-boot: mark a candidate that never validated as bad
+Documentation=file:///usr/local/sbin/vip-boot
+# Only on a boot without the tryboot flag: vip-boot settle checks that itself.
+After=local-fs.target
+ConditionPathExists=/proc/device-tree/chosen/bootloader/tryboot
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vip-boot settle
+
+[Install]
+WantedBy=multi-user.target pedal-maint.target

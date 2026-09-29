@@ -1,0 +1,17 @@
+[Unit]
+Description=vip-boot: validate a candidate slot, then promote it or roll it back
+Documentation=file:///usr/local/libexec/vip-boot-validate
+# Only on a candidate's own boot: vip-boot validate checks that itself, and does nothing on a
+# loose one-shot. It waits for sshd and a real network address, so it needs time: the default
+# 90s could kill it mid-check, which would mark a good kernel bad (as on piv).
+After=network-online.target ssh.service vip-boot-settle.service
+Wants=network-online.target
+ConditionPathExists=/proc/device-tree/chosen/bootloader/tryboot
+
+[Service]
+Type=oneshot
+TimeoutStartSec=300
+ExecStart=/usr/local/sbin/vip-boot validate
+
+[Install]
+WantedBy=multi-user.target pedal-maint.target

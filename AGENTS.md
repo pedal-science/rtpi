@@ -27,6 +27,11 @@ make test-tib              # latency and xrun suite; results go to results/
 - **`tib` is not a Raspberry Pi.** No `config.txt`, no Pi overlays. Its device tree changes
   (the WM8960 audio card, the UART) belong here.
 - **Cap `tib`'s clock for sustained runs** (1416 MHz). Uncapped, it hits the thermal trip.
+- **vip** (Raspberry Pi 5, the pedal's Core host) is built from an image, not upgraded with apt:
+  no flash-kernel, no piboot-try. `devices/vip/usr/local/sbin/vip-boot` selects its kernel slot,
+  profile and root; `tests/vip-boot` tests it off the board
+  (`python3 -m unittest discover -s tests/vip-boot`, on Linux). The card layout and the reasons
+  are in pedal.project's `docs/vip-image.md`.
 - On piv: no custom kernel flavour names, no `threadirqs` on an RT kernel,
   `RT_GROUP_SCHED` off. `README.md` "Things that will bite you" says why.
 

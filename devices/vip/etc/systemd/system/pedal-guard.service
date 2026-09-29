@@ -1,0 +1,16 @@
+[Unit]
+Description=pedal-guard: this boot reached the engine, so reset the boot counter
+Documentation=file:///usr/lib/dracut/modules.d/95vip-guard/vip-guard.sh
+# The initramfs counts boots on bootsel and falls back to rescue after GUARD_LIMIT in a row
+# that never got here. "Here" is namchaind running: not the network, which a pedal at a gig
+# doesn't have. In the loose profile pedal-guard-maint.service does this job instead.
+After=namchaind.service
+ConditionKernelCommandLine=vipboot.root=pedal
+ConditionKernelCommandLine=!systemd.unit=pedal-maint.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/vip-boot guard-clear --require-unit namchaind.service --wait 120
+
+[Install]
+WantedBy=multi-user.target
