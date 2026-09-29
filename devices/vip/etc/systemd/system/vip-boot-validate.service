@@ -2,10 +2,11 @@
 Description=vip-boot: validate a candidate slot, then promote it or roll it back
 Documentation=file:///usr/local/libexec/vip-boot-validate
 # Only on a candidate's own boot: vip-boot validate checks that itself, and does nothing on a
-# loose one-shot. It waits for sshd and a real network address, so it needs time: the default
-# 90s could kill it mid-check, which would mark a good kernel bad (as on piv).
-After=network-online.target ssh.service vip-boot-settle.service
-Wants=network-online.target
+# loose one-shot. The hook waits for sshd and a real network address itself, so it needs time:
+# the default 90s could kill it mid-check, which would mark a good kernel bad (as on piv).
+# Not After=network-online.target: with no cable in eth0 that waits up to two minutes for
+# nothing (on the spike, validation was still queued behind it when the boot was cut short).
+After=ssh.service vip-boot-settle.service
 ConditionPathExists=/proc/device-tree/chosen/bootloader/tryboot
 
 [Service]

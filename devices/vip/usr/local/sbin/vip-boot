@@ -456,8 +456,20 @@ def cmd_try_args(board, args):
     try_candidate(board, args, board.release(active), " ".join(args.args.split()), from_active=True)
 
 
+def need_loose_target(board):
+    """The loose profile boots systemd.unit=<target>. If that target isn't installed, systemd
+    drops to emergency mode: no network, and nothing brings it back but a power cycle."""
+    for word in board.env["LOOSE_ARGS"].split():
+        if word.startswith("systemd.unit="):
+            unit = word.split("=", 1)[1]
+            if not any(os.path.exists(p(d) + unit) for d in
+                       ("/etc/systemd/system/", "/usr/lib/systemd/system/", "/lib/systemd/system/")):
+                die(f"{unit} is not installed: a loose boot would drop to emergency mode")
+
+
 def cmd_loose(board, args):
     need_pedal(board)
+    need_loose_target(board)
     board.need_pedal_boot()
     board.arm("cmdline=cmdline-loose.txt")
     log("armed: one loose boot")
@@ -467,6 +479,8 @@ def cmd_loose(board, args):
 
 def cmd_default(board, args):
     if args.what in PROFILES:
+        if args.what == "loose":
+            need_loose_target(board)
         board.need_pedal_boot()
         active, _ = board.spare()
         board.set_profile(active, args.what)

@@ -47,6 +47,9 @@ class FakeVip(unittest.TestCase):
         os.chmod(f"{r}/reboot", 0o755)
         os.makedirs(f"{r}/usr/local/libexec")
         self.set_validate(True)
+        os.makedirs(f"{r}/usr/lib/systemd/system")
+        with open(f"{r}/usr/lib/systemd/system/pedal-maint.target", "w") as f:
+            f.write("[Unit]\n")
         # The partitions, as the image build makes them.
         self.bootsel = r + self.env["BOOTSEL_MOUNT"]
         self.boot = r + self.env["PEDAL_BOOT_MOUNT"]
@@ -294,6 +297,14 @@ class TestProfilesAndRoots(FakeVip):
         self.boot_as(slot="a")
         self.run_vb("settle")
         self.assertEqual(self.armed(), [])
+
+    def test_loose_refused_without_its_target(self):
+        os.remove(f"{self.root}/usr/lib/systemd/system/pedal-maint.target")
+        self.assertNotEqual(self.run_vb("loose", check=False).returncode, 0)
+        self.assertNotEqual(self.run_vb("default", "loose", check=False).returncode, 0)
+        self.assertEqual(self.armed(), [])
+        self.assertEqual(self.profile(), ("a", "tuned"))
+        self.assertEqual(self.reboots_seen(), [])
 
     def test_default_profile(self):
         before = self.sizes()

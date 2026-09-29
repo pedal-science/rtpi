@@ -38,6 +38,14 @@ vip_guard() {
     _mp=$_p/run/vip-guard
     if [ -z "${VIPGUARD_NO_MOUNT:-}" ]; then
         mkdir -p "$_mp"
+        # Hooks run under systemd here, and pre-mount can come before the card's partitions
+        # appear (on the spike: the hook at 1.4 s, the root at 2.2 s). Waiting for the root
+        # instead (pre-pivot) would miss the boots that matter most, the ones whose root never
+        # mounts, so wait for bootsel, which is on the same card.
+        _i=0
+        while [ ! -e "/dev/disk/by-label/$_label" ] && [ "$_i" -lt 30 ]; do
+            sleep 1; _i=$(( _i + 1 ))
+        done
         mount -t vfat -o rw,noatime "/dev/disk/by-label/$_label" "$_mp" 2>/dev/null || {
             echo "vip-guard: cannot mount $_label: boot not counted" >&2; return 0; }
     fi
