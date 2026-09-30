@@ -241,10 +241,17 @@ class Board:
         return self.marks().get("root", "unknown")
 
     # --- mounts
-    def mount(self, label_key, where):
+    def mount(self, label_key, attr):
+        where = getattr(self, attr)
         if os.environ.get("VIPBOOT_NO_MOUNT") == "1" or os.path.ismount(where):
             return
-        os.makedirs(where, exist_ok=True)
+        try:
+            os.makedirs(where, exist_ok=True)
+        except OSError:
+            # The rescue root is read-only and may lack the mount point: mount under /run instead.
+            where = p("/run/vip-boot/") + self.env[label_key].lower()
+            os.makedirs(where, exist_ok=True)
+            setattr(self, attr, where)
         r = subprocess.run(["mount", "-o", "rw,noatime", f"LABEL={self.env[label_key]}", where])
         if r.returncode:
             die(f"cannot mount LABEL={self.env[label_key]} on {where}")
@@ -257,10 +264,10 @@ class Board:
         self.mounted = []
 
     def need_bootsel(self):
-        self.mount("BOOTSEL_LABEL", self.bootsel)
+        self.mount("BOOTSEL_LABEL", "bootsel")
 
     def need_pedal_boot(self):
-        self.mount("PEDAL_BOOT_LABEL", self.pedal_boot)
+        self.mount("PEDAL_BOOT_LABEL", "pedal_boot")
 
     # --- the pedal boot partition
     def profile(self):
