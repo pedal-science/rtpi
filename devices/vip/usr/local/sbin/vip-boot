@@ -603,17 +603,36 @@ def cmd_deadline(board, args):
     board.reboot(None)
 
 
+def unit_run(unit):
+    """(ActiveState, InvocationID) of a unit: which run of it this is, not only whether it's up."""
+    out = subprocess.run([os.environ.get("VIPBOOT_SYSTEMCTL", "systemctl"), "show", "-p", "ActiveState",
+                          "-p", "InvocationID", unit], capture_output=True, text=True).stdout
+    props = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    return props.get("ActiveState", "unknown"), props.get("InvocationID", "")
+
+
 def cmd_guard_clear(board, args):
+    """The boot reached its target: reset the counter. With --require-unit, only once that unit has
+    stayed active, in one run, for --settle seconds. A unit that fails and restarts every second
+    (namchaind with a config it can't read) is `active` for a moment each time, and a single look
+    caught one of those moments on vip: the count was cleared for a pedal that never played, and
+    vip-boot deadline then rightly left it alone (step 7)."""
     if args.require_unit:
         deadline = time.time() + args.wait
+        seen = None                       # (invocation, since) of the run being watched
         while True:
-            state = subprocess.run(["systemctl", "is-active", args.require_unit],
-                                   capture_output=True, text=True).stdout.strip()
-            if state == "active":
-                break
+            state, invocation = unit_run(args.require_unit)
+            if state == "active" and invocation:
+                if seen is None or seen[0] != invocation:
+                    seen = (invocation, time.time())
+                elif time.time() - seen[1] >= args.settle:
+                    break
+            else:
+                seen = None
             if time.time() > deadline:
-                die(f"{args.require_unit} is {state}: this boot is not counted as good")
-            time.sleep(2)
+                die(f"{args.require_unit} is {state} and hasn't stayed up for {args.settle} s: "
+                    "this boot is not counted as good")
+            time.sleep(1)
     board.need_bootsel()
     board.set_count(0)
     board.unmount_all()
@@ -699,6 +718,7 @@ def main(argv=None):
     s = sub.add_parser("deadline"); s.add_argument("--after", type=int, default=300)
     s = sub.add_parser("guard-clear")
     s.add_argument("--require-unit"); s.add_argument("--wait", type=int, default=120)
+    s.add_argument("--settle", type=int, default=10)
     s = sub.add_parser("init-bootsel"); s.add_argument("--dir", required=True)
     for name in ("init-pedal-boot", "init-rescue-boot"):
         s = sub.add_parser(name)

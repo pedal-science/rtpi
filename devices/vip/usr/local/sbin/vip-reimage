@@ -52,10 +52,10 @@ grep -qw 'vipboot.root=rescue' /proc/cmdline || die "run this from the rescue ro
 VIPBOOT=$(dirname "$0")/vip-boot
 [[ -x $VIPBOOT ]] || VIPBOOT=vip-boot
 
-# pedal-data, read-only unless receiving.
+# pedal-data, read-only unless an image is received or the two swap places.
 mnt=$(mktemp -d /run/vip-reimage.XXXXXX)
 trap 'umount "$mnt" 2>/dev/null; rmdir "$mnt"' EXIT
-mount -o "$([[ $CMD == receive ]] && echo rw || echo ro)" "/dev/disk/by-label/$PEDAL_DATA_LABEL" "$mnt" \
+mount -o "$([[ $CMD == receive ]] || (( PREVIOUS )) && echo rw || echo ro)" "/dev/disk/by-label/$PEDAL_DATA_LABEL" "$mnt" \
   || die "cannot mount $PEDAL_DATA_LABEL"
 img=$mnt/$PEDAL_IMAGE; sha=$mnt/$PEDAL_IMAGE_SHA
 prev_img=$mnt/$PEDAL_IMAGE_PREV; prev_sha=$mnt/$PEDAL_IMAGE_PREV_SHA
@@ -102,6 +102,16 @@ log "reading it back"
 back=$(head -c "$bytes" "$dev" | sha256sum | awk '{print $1}')
 [[ $back == "$want" ]] || die "what was written doesn't read back the same: the card may be failing"
 e2fsck -fp "$dev" >&2 || [[ $? -le 1 ]] || die "the restored filesystem doesn't check"
+
+if (( PREVIOUS )); then
+  # What the pedal root now holds is the current image; the one it replaced becomes the previous.
+  # Otherwise a later plain `vip-reimage pedal` would restore the image that was just backed out.
+  swap() { mv -f "$1" "$1.swap"; mv -f "$2" "$1"; mv -f "$1.swap" "$2"; }
+  swap "$mnt/$PEDAL_IMAGE" "$mnt/$PEDAL_IMAGE_PREV"
+  swap "$mnt/$PEDAL_IMAGE_SHA" "$mnt/$PEDAL_IMAGE_PREV_SHA"
+  sync
+  log "the previous image is now the current one on $PEDAL_DATA_LABEL, and the other the previous"
+fi
 
 if (( KEEP_DEFAULT )); then
   log "the pedal root is the image's again; rescue stays the default (try it with vip-boot try-pedal)"

@@ -417,6 +417,34 @@ class TestGuard(FakeVip):
             waiting.wait(timeout=10)
         self.assertEqual(self.reboots_seen(), [])
 
+    def fake_systemctl(self, script):
+        path = f"{self.root}/systemctl"
+        with open(path, "w") as f:
+            f.write("#!/bin/sh\n" + script)
+        os.chmod(path, 0o755)
+        return path
+
+    def run_clear(self, systemctl, *extra):
+        env = dict(os.environ, VIPBOOT_PREFIX=self.root, VIPBOOT_NO_MOUNT="1",
+                   VIPBOOT_REBOOT=f"{self.root}/reboot", VIPBOOT_SYSTEMCTL=systemctl)
+        return subprocess.run(["python3", VIPBOOT, "--env", ENV, "guard-clear", "--require-unit", "namchaind.service",
+                               *extra], env=env, capture_output=True, text=True)
+
+    def test_guard_clear_waits_for_the_unit_to_stay_up(self):
+        self.run_guard()
+        stable = self.fake_systemctl('echo ActiveState=active; echo InvocationID=abc\n')
+        r = self.run_clear(stable, "--settle", "1", "--wait", "5")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.count(), vb.count_text(0))
+
+    def test_guard_clear_refuses_a_unit_that_keeps_restarting(self):
+        # Active at every look, but a new run each time: namchaind failing and restarting.
+        self.run_guard()
+        flapping = self.fake_systemctl('echo ActiveState=active; echo InvocationID=$(date +%s%N)\n')
+        r = self.run_clear(flapping, "--settle", "1", "--wait", "3")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.count(), vb.count_text(1))
+
     def test_guard_clear_resets(self):
         self.run_guard()
         self.run_guard()
