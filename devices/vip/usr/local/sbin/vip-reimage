@@ -1,0 +1,56 @@
+#!/bin/bash
+# vip-reimage pedal [--reboot] — from the rescue root, put the pedal root back as the image built it.
+#
+# The image build (pedal.project, devices/common/image/build-image) keeps the pedal root's ext4
+# image, zstd-compressed, on pedal-data, with the sha256 of the uncompressed image. This checks
+# the image against that hash, writes it over the pedal root's partition (found by its GPT name,
+# since the filesystem label may be what's broken), reads the partition back and checks the same
+# hash, then makes the pedal the default root again with its boot count at 0 (`vip-boot default
+# pedal`). --reboot boots it.
+#
+# What it doesn't touch: pedal-data (the library, rigs, last.json stay), and the pedal's boot
+# partition (the kernel slots). The restored root is the image's, so apply anything done since
+# with devices/vip/apply afterwards.
+
+set -euo pipefail
+log() { echo "vip-reimage: $*" >&2; }
+die() { log "$*"; exit 1; }
+
+[[ ${1:-} == pedal ]] || die "usage: vip-reimage pedal [--reboot]"
+REBOOT=0; [[ ${2:-} == --reboot ]] && REBOOT=1
+[[ $EUID -eq 0 ]] || exec sudo "$0" "$@"
+# shellcheck disable=SC1091
+source /etc/rtpi/device.env
+grep -qw 'vipboot.root=rescue' /proc/cmdline || die "run this from the rescue root, not the one it would overwrite"
+
+dev=/dev/disk/by-partlabel/$PEDAL_ROOT_PARTLABEL
+[[ -b $dev ]] || die "no partition named $PEDAL_ROOT_PARTLABEL"
+dev=$(readlink -f "$dev")
+findmnt -S "$dev" >/dev/null && die "$dev is mounted: unmount it first"
+
+mnt=$(mktemp -d /run/vip-reimage.XXXXXX)
+trap 'umount "$mnt" 2>/dev/null; rmdir "$mnt"' EXIT
+mount -o ro "/dev/disk/by-label/$PEDAL_DATA_LABEL" "$mnt" || die "cannot mount $PEDAL_DATA_LABEL"
+img=$mnt/$PEDAL_IMAGE
+[[ -f $img && -f $mnt/$PEDAL_IMAGE_SHA ]] || die "no image on $PEDAL_DATA_LABEL ($PEDAL_IMAGE)"
+want=$(awk '{print $1}' "$mnt/$PEDAL_IMAGE_SHA")
+
+log "checking the image (two passes: its hash, then its size)"
+got=$(zstd -dc "$img" | sha256sum | awk '{print $1}')
+[[ $got == "$want" ]] || die "the image doesn't match its hash: not writing it"
+bytes=$(zstd -dc "$img" | wc -c)
+psize=$(blockdev --getsize64 "$dev")
+(( bytes <= psize )) || die "the image ($bytes bytes) is bigger than $dev ($psize)"
+
+log "writing $bytes bytes to $dev"
+zstd -dc "$img" | dd of="$dev" bs=4M conv=fsync status=progress
+sync
+log "reading it back"
+back=$(head -c "$bytes" "$dev" | sha256sum | awk '{print $1}')
+[[ $back == "$want" ]] || die "what was written doesn't read back the same: the card may be failing"
+e2fsck -fp "$dev" >&2 || [[ $? -le 1 ]] || die "the restored filesystem doesn't check"
+
+vip-boot default pedal
+log "the pedal root is the image's again, and the default"
+(( REBOOT )) && exec systemctl reboot
+exit 0
