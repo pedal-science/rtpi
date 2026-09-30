@@ -338,6 +338,18 @@ class TestProfilesAndRoots(FakeVip):
         self.assertEqual(self.default_part(), self.env["PEDAL_BOOT_PART"])
         self.assertEqual(self.sizes(), before)
 
+    def test_try_pedal_from_rescue_leaves_rescue_the_default(self):
+        self.boot_as(root="rescue")
+        self.run_vb("stay")
+        self.run_vb("try-pedal")
+        self.assertEqual(self.reboots_seen(), [self.env["PEDAL_BOOT_PART"]])
+        self.assertEqual(self.default_part(), self.env["RESCUE_BOOT_PART"])
+
+    def test_try_pedal_refused_on_the_pedal(self):
+        r = self.run_vb("try-pedal", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.reboots_seen(), [])
+
     def test_stay_from_rescue(self):
         self.boot_as(root="rescue")
         self.run_vb("stay")

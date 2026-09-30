@@ -1,39 +1,92 @@
 #!/bin/bash
-# vip-reimage pedal [--reboot] — from the rescue root, put the pedal root back as the image built it.
+# vip-reimage — from the rescue root, put a pedal root image on vip.
+#
+#   vip-reimage pedal [--previous] [--keep-default] [--reboot]
+#       write the pedal root image kept on pedal-data over the pedal root
+#   vip-reimage receive <sha256>
+#       take a new image (zstd, on stdin) into pedal-data; the one there becomes the previous one
+#   options anywhere: --env FILE   the device facts to use (default /etc/rtpi/device.env)
 #
 # The image build (pedal.project, devices/common/image/build-image) keeps the pedal root's ext4
-# image, zstd-compressed, on pedal-data, with the sha256 of the uncompressed image. This checks
+# image, zstd-compressed, on pedal-data, with the sha256 of the uncompressed image. `pedal` checks
 # the image against that hash, writes it over the pedal root's partition (found by its GPT name,
 # since the filesystem label may be what's broken), reads the partition back and checks the same
-# hash, then makes the pedal the default root again with its boot count at 0 (`vip-boot default
-# pedal`). --reboot boots it.
+# hash. Then it makes the pedal the default root again with its boot count at 0 (`vip-boot default
+# pedal`), unless --keep-default: pedal.project's `make-card --remote` boots a new root once, as a
+# candidate, with rescue still the default. --previous writes the image that was there before the
+# last `receive`. --reboot boots the pedal.
 #
-# What it doesn't touch: pedal-data (the library, rigs, last.json stay), and the pedal's boot
-# partition (the kernel slots). The restored root is the image's, so apply anything done since
-# with devices/vip/apply afterwards.
+# `receive` is how a new image arrives from the Mac (make-card --remote): it's written beside the
+# current one, its uncompressed hash checked against <sha256>, and only then swapped in, the
+# current image and hash kept as the previous ones. A transfer cut short changes nothing.
+#
+# What it doesn't touch: the rest of pedal-data (the library, rigs, last.json stay), and the
+# pedal's boot partition (the kernel slots). The restored root is the image's, so apply anything
+# done since with devices/vip/apply afterwards.
 
 set -euo pipefail
 log() { echo "vip-reimage: $*" >&2; }
 die() { log "$*"; exit 1; }
+usage() { die "usage: vip-reimage pedal [--previous] [--keep-default] [--reboot] | receive <sha256>  [--env FILE]"; }
 
-[[ ${1:-} == pedal ]] || die "usage: vip-reimage pedal [--reboot]"
-REBOOT=0; [[ ${2:-} == --reboot ]] && REBOOT=1
-[[ $EUID -eq 0 ]] || exec sudo "$0" "$@"
-# shellcheck disable=SC1091
-source /etc/rtpi/device.env
+ENV_FILE=/etc/rtpi/device.env
+CMD=""; SHA=""; PREVIOUS=0; KEEP_DEFAULT=0; REBOOT=0
+ARGS=("$@")
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    pedal|receive) [[ -z $CMD ]] || usage; CMD=$1 ;;
+    --previous) PREVIOUS=1 ;;
+    --keep-default) KEEP_DEFAULT=1 ;;
+    --reboot) REBOOT=1 ;;
+    --env) ENV_FILE=$2; shift ;;
+    *) [[ $CMD == receive && -z $SHA ]] && SHA=$1 || usage ;;
+  esac
+  shift
+done
+[[ -n $CMD ]] || usage
+[[ $CMD == pedal || $SHA =~ ^[0-9a-f]{64}$ ]] || usage
+[[ $EUID -eq 0 ]] || exec sudo "$0" "${ARGS[@]}"
+# shellcheck disable=SC1090
+source "$ENV_FILE"
 grep -qw 'vipboot.root=rescue' /proc/cmdline || die "run this from the rescue root, not the one it would overwrite"
+VIPBOOT=$(dirname "$0")/vip-boot
+[[ -x $VIPBOOT ]] || VIPBOOT=vip-boot
 
+# pedal-data, read-only unless receiving.
+mnt=$(mktemp -d /run/vip-reimage.XXXXXX)
+trap 'umount "$mnt" 2>/dev/null; rmdir "$mnt"' EXIT
+mount -o "$([[ $CMD == receive ]] && echo rw || echo ro)" "/dev/disk/by-label/$PEDAL_DATA_LABEL" "$mnt" \
+  || die "cannot mount $PEDAL_DATA_LABEL"
+img=$mnt/$PEDAL_IMAGE; sha=$mnt/$PEDAL_IMAGE_SHA
+prev_img=$mnt/$PEDAL_IMAGE_PREV; prev_sha=$mnt/$PEDAL_IMAGE_PREV_SHA
+
+if [[ $CMD == receive ]]; then
+  mkdir -p "$(dirname "$img")"
+  log "receiving the image"
+  cat > "$img.new"
+  log "checking it: $(du -h "$img.new" | cut -f1) compressed"
+  got=$(zstd -dc "$img.new" | sha256sum | awk '{print $1}')
+  if [[ $got != "$SHA" ]]; then
+    rm -f "$img.new"
+    die "what arrived doesn't match its hash: kept the images as they were"
+  fi
+  if [[ -f $img && -f $sha ]]; then
+    mv -f "$img" "$prev_img"; mv -f "$sha" "$prev_sha"
+  fi
+  mv -f "$img.new" "$img"
+  echo "$SHA  $(basename "$img" .zst)" > "$sha"
+  sync
+  log "received; the image that was there is now the previous one"
+  exit 0
+fi
+
+if (( PREVIOUS )); then img=$prev_img; sha=$prev_sha; fi
 dev=/dev/disk/by-partlabel/$PEDAL_ROOT_PARTLABEL
 [[ -b $dev ]] || die "no partition named $PEDAL_ROOT_PARTLABEL"
 dev=$(readlink -f "$dev")
 findmnt -S "$dev" >/dev/null && die "$dev is mounted: unmount it first"
-
-mnt=$(mktemp -d /run/vip-reimage.XXXXXX)
-trap 'umount "$mnt" 2>/dev/null; rmdir "$mnt"' EXIT
-mount -o ro "/dev/disk/by-label/$PEDAL_DATA_LABEL" "$mnt" || die "cannot mount $PEDAL_DATA_LABEL"
-img=$mnt/$PEDAL_IMAGE
-[[ -f $img && -f $mnt/$PEDAL_IMAGE_SHA ]] || die "no image on $PEDAL_DATA_LABEL ($PEDAL_IMAGE)"
-want=$(awk '{print $1}' "$mnt/$PEDAL_IMAGE_SHA")
+[[ -f $img && -f $sha ]] || die "no image on $PEDAL_DATA_LABEL (${img#"$mnt"/})"
+want=$(awk '{print $1}' "$sha")
 
 log "checking the image (two passes: its hash, then its size)"
 got=$(zstd -dc "$img" | sha256sum | awk '{print $1}')
@@ -50,7 +103,11 @@ back=$(head -c "$bytes" "$dev" | sha256sum | awk '{print $1}')
 [[ $back == "$want" ]] || die "what was written doesn't read back the same: the card may be failing"
 e2fsck -fp "$dev" >&2 || [[ $? -le 1 ]] || die "the restored filesystem doesn't check"
 
-vip-boot default pedal
-log "the pedal root is the image's again, and the default"
+if (( KEEP_DEFAULT )); then
+  log "the pedal root is the image's again; rescue stays the default (try it with vip-boot try-pedal)"
+else
+  "$VIPBOOT" --env "$ENV_FILE" default pedal
+  log "the pedal root is the image's again, and the default"
+fi
 (( REBOOT )) && exec systemctl reboot
 exit 0

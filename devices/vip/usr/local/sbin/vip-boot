@@ -9,6 +9,7 @@
     vip-boot default pedal|rescue                 which root boots from now on
     vip-boot rescue [--stay] [--no-reboot]        boot the rescue root once (or until told otherwise)
     vip-boot stay                                 from rescue: stay in rescue (= default rescue)
+    vip-boot try-pedal [--no-reboot]              from rescue: boot the pedal root once, rescue staying the default
 
   run by units, not by hand:
     vip-boot settle          early every boot: a candidate still marked trying on a normal boot failed
@@ -512,6 +513,23 @@ def cmd_rescue(board, args):
         board.reboot(None if args.stay else board.env["RESCUE_BOOT_PART"])
 
 
+def cmd_try_pedal(board, args):
+    """From rescue: boot the pedal root once, leaving rescue the default. reboot "<N>" boots
+    partition N once with no flag and nothing written, so whatever that boot does, the next one is
+    rescue again unless something makes the pedal the default (`vip-boot default pedal`). This is
+    how a new pedal root is tried (pedal.project, make-card --remote): a root that hangs, reboots
+    or never reaches the network lands back in rescue, where it can be replaced again."""
+    if board.root != "rescue":
+        die(f"this runs on the rescue root; this is {board.root}")
+    board.need_bootsel()
+    if board.default_root() != "rescue":
+        log("the pedal is already the default: this is just a reboot into it")
+    board.unmount_all()
+    log("booting the pedal root once; rescue stays the default")
+    if not args.no_reboot:
+        board.reboot(board.env["PEDAL_BOOT_PART"])
+
+
 def cmd_stay(board, _args):
     board.need_bootsel()
     board.set_default_root("rescue")
@@ -675,6 +693,7 @@ def main(argv=None):
     s = sub.add_parser("default"); s.add_argument("what", choices=PROFILES + ("pedal", "rescue"))
     s = sub.add_parser("rescue"); s.add_argument("--stay", action="store_true"); s.add_argument("--no-reboot", action="store_true")
     sub.add_parser("stay")
+    s = sub.add_parser("try-pedal"); s.add_argument("--no-reboot", action="store_true")
     sub.add_parser("settle")
     sub.add_parser("validate")
     s = sub.add_parser("deadline"); s.add_argument("--after", type=int, default=300)
@@ -703,7 +722,7 @@ def main(argv=None):
     board = Board(env)
     try:
         {"status": cmd_status, "try-kernel": cmd_try_kernel, "try-args": cmd_try_args,
-         "loose": cmd_loose, "default": cmd_default, "rescue": cmd_rescue, "stay": cmd_stay,
+         "loose": cmd_loose, "default": cmd_default, "rescue": cmd_rescue, "stay": cmd_stay, "try-pedal": cmd_try_pedal,
          "settle": cmd_settle, "validate": cmd_validate,
          "guard-clear": cmd_guard_clear, "deadline": cmd_deadline}[args.cmd](board, args)
     finally:
