@@ -1,0 +1,19 @@
+[Unit]
+Description=vip-boot: a pedal boot that hasn't reached pedal-guard in five minutes reboots, so it counts
+Documentation=file:///usr/local/sbin/vip-boot
+# Without this, a pedal root that hangs short of the engine (a unit with no timeout, a mount that
+# never comes) sits there with PID 1 feeding the watchdog, the boot counter never moves, and the
+# fallback to rescue never comes (pedal.project bench-results/vip-card/fallbacks.md). Started
+# early and ordered after nothing, so whatever hangs can't hold it; Type=simple, so its sleep isn't
+# a pending job. It leaves a boot that reached the engine alone, whatever else is stuck.
+DefaultDependencies=no
+ConditionKernelCommandLine=vipboot.root=pedal
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/vip-boot deadline --after 300
+
+[Install]
+WantedBy=sysinit.target

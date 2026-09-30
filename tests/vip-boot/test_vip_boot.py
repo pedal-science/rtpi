@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -366,6 +367,43 @@ class TestGuard(FakeVip):
         self.assertIn("rescue made the default", self.read(f"{self.bootsel}/vipboot/reason"))
         self.assertEqual(self.reboots_seen(), ["<plain>"])
         self.assertEqual(self.sizes(), before)
+
+    def test_deadline_reboots_a_boot_that_never_reached_the_guard(self):
+        self.run_guard()                                   # the initramfs counted this boot
+        self.run_vb("deadline", "--after", "0")
+        self.assertEqual(self.reboots_seen(), ["<plain>"])
+        self.assertIn("hadn't reached pedal-guard", self.read(f"{self.bootsel}/vipboot/reason"))
+        self.assertEqual(self.count(), vb.count_text(1))  # the next boot's initramfs adds to it
+
+    def test_deadline_leaves_a_guarded_boot_alone(self):
+        self.run_guard()
+        self.run_vb("guard-clear")                         # the engine came up
+        self.run_vb("deadline", "--after", "0")
+        self.assertEqual(self.reboots_seen(), [])
+
+    def test_deadline_leaves_candidates_and_rescue_alone(self):
+        self.run_guard()
+        self.boot_as(slot="b", tryboot=True)
+        self.run_vb("deadline", "--after", "0")
+        self.boot_as(root="rescue")
+        self.run_vb("deadline", "--after", "0")
+        self.assertEqual(self.reboots_seen(), [])
+
+    def test_deadline_does_not_hold_the_lock_while_it_waits(self):
+        # pedal-guard's guard-clear must get through during the wait, or the deadline would reboot
+        # a pedal that reached its engine.
+        self.run_guard()
+        env = dict(os.environ, VIPBOOT_PREFIX=self.root, VIPBOOT_NO_MOUNT="1",
+                   VIPBOOT_REBOOT=f"{self.root}/reboot")
+        waiting = subprocess.Popen(["python3", VIPBOOT, "--env", ENV, "deadline", "--after", "3"], env=env)
+        try:
+            time.sleep(0.5)
+            start = time.time()
+            self.run_vb("guard-clear")
+            self.assertLess(time.time() - start, 2)
+        finally:
+            waiting.wait(timeout=10)
+        self.assertEqual(self.reboots_seen(), [])
 
     def test_guard_clear_resets(self):
         self.run_guard()

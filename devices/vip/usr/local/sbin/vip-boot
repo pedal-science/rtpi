@@ -14,6 +14,7 @@
     vip-boot settle          early every boot: a candidate still marked trying on a normal boot failed
     vip-boot validate        on a candidate boot: check it, then promote it or mark it bad and reboot
     vip-boot guard-clear     the pedal reached its target: reset the boot counter
+    vip-boot deadline        early every boot, sleeping first: a boot that never cleared the counter reboots
 
   run by the image build (pedal.project), with --dir pointing at the partition's staging directory:
     vip-boot init-bootsel --dir D
@@ -564,6 +565,26 @@ def cmd_validate(board, _args):
         board.reboot(None)
 
 
+def cmd_deadline(board, args):
+    """A boot of the pedal that hasn't cleared the boot counter by now is stuck: namchaind never
+    started (a hang before it, a failed mount, a broken unit), and PID 1 still feeds the watchdog,
+    so nothing would ever reboot it and the counter would never reach GUARD_LIMIT. Reboot, so the
+    initramfs counts it. A boot that reached the engine has cleared the count and is left alone,
+    whatever else hangs, so a pedal that plays is never rebooted by this. Candidates are
+    validate's business, and rescue isn't counted. main() sleeps before taking the lock."""
+    if board.root != "pedal" or board.tryboot:
+        return
+    board.need_bootsel()
+    n = board.count()
+    if n == 0:
+        board.unmount_all()
+        return
+    board.set_reason(f"boot {n} of the pedal hadn't reached pedal-guard after {args.after} s: rebooted "
+                     f"so it counts (rescue after {board.env['GUARD_LIMIT']})")
+    log(f"this boot hasn't reached pedal-guard after {args.after} s: rebooting so it counts")
+    board.reboot(None)
+
+
 def cmd_guard_clear(board, args):
     if args.require_unit:
         deadline = time.time() + args.wait
@@ -656,6 +677,7 @@ def main(argv=None):
     sub.add_parser("stay")
     sub.add_parser("settle")
     sub.add_parser("validate")
+    s = sub.add_parser("deadline"); s.add_argument("--after", type=int, default=300)
     s = sub.add_parser("guard-clear")
     s.add_argument("--require-unit"); s.add_argument("--wait", type=int, default=120)
     s = sub.add_parser("init-bootsel"); s.add_argument("--dir", required=True)
@@ -673,6 +695,9 @@ def main(argv=None):
 
     if args.cmd != "status" and os.geteuid() != 0 and not PREFIX:
         os.execvp("sudo", ["sudo", sys.argv[0]] + (argv if argv is not None else sys.argv[1:]))
+    if args.cmd == "deadline":
+        # Before the lock: held through the sleep, it would block pedal-guard's own guard-clear.
+        time.sleep(args.after)
     lock = open(p("/run/vip-boot.lock"), "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
     board = Board(env)
@@ -680,7 +705,7 @@ def main(argv=None):
         {"status": cmd_status, "try-kernel": cmd_try_kernel, "try-args": cmd_try_args,
          "loose": cmd_loose, "default": cmd_default, "rescue": cmd_rescue, "stay": cmd_stay,
          "settle": cmd_settle, "validate": cmd_validate,
-         "guard-clear": cmd_guard_clear}[args.cmd](board, args)
+         "guard-clear": cmd_guard_clear, "deadline": cmd_deadline}[args.cmd](board, args)
     finally:
         board.unmount_all()
 
