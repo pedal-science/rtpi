@@ -10,9 +10,11 @@ FROM ubuntu:26.04
 ARG DEBIAN_FRONTEND=noninteractive
 
 # Kernel build essentials. dwarves supplies pahole, needed for BTF generation; without
-# it modern kernel builds fail late and confusingly.
+# it modern kernel builds fail late and confusingly. gawk builds modules.builtin.ranges
+# (scripts/Makefile.vmlinux); without it a build that has compiled everything dies at
+# the final vmlinux step, which is how it was found (vip's first rebuild).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential bc bison flex \
+      build-essential bc bison flex gawk \
       libssl-dev libelf-dev libncurses-dev \
       dwarves rsync kmod cpio zstd xz-utils \
       git ca-certificates curl wget \

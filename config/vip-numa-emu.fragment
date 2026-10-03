@@ -1,0 +1,8 @@
+# NUMA emulation for vip (the pedal's Core host, Raspberry Pi 5). Ubuntu ships the pedal's
+# kernel (linux-raspi 7.0.0-1017-raspi-realtime) with CONFIG_NUMA=y and CONFIG_NUMA_MEMBLKS=y
+# but CONFIG_NUMA_EMU=n. That one bit cannot be set at boot: on the stock kernel
+# `numa=fake=4` answers "Malformed early option 'numa'" (pedal.project,
+# bench-results/vip-card/console-step6-pass1.log). Flipping it costs a rebuild, nothing else —
+# no patch: the emulation code is already in the tree. Applied by
+# scripts/build/vip-ubuntu-rt.sh, which asserts it landed before building.
+CONFIG_NUMA_EMU=y

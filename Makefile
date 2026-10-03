@@ -112,6 +112,22 @@ rehearse-piv-failure: ## Prove automatic fallback works with a deliberately brok
 piv-apt-rt: ## Install Ubuntu's linux-raspi-realtime on piv via the tryboot path
 	scripts/deploy/piv-apt-rt.sh
 
+## vip — the pedal Core host: rebuild its Ubuntu kernel with NUMA emulation (config/vip-numa-emu.fragment)
+.PHONY: vip-rt
+vip-rt: ## 1. Build vip's kernel (Ubuntu linux-raspi tag from the board + the fragment)
+	$(SCRIPTS)/build/vip-ubuntu-rt.sh
+
+.PHONY: vip-install-rt
+vip-install-rt: ## 2. Install the built kernel into the running pedal root (modules, /boot, guarded initrd)
+	$(SCRIPTS)/deploy/vip-install-rt.sh
+
+.PHONY: vip-try
+vip-try: ## 3. Stage the candidate slot, reboot once, watch validation promote or roll back
+	@REL=$$(cat build/vip/kernelrelease 2>/dev/null); \
+	  [ -n "$$REL" ] || { echo "no build/vip/kernelrelease — build and install first"; exit 1; }; \
+	  ssh vip 'sudo vip-boot try-kernel '"$$REL" || exit 1; \
+	  $(SCRIPTS)/safety/watch-reboot.sh vip --expect "$$REL"
+
 ## piv audio tuning — the runtime half is safe to apply any time; the boot half reboots
 .PHONY: piv-audio-tune
 piv-audio-tune: ## 1. Install + apply IRQ pinning and priority (runtime only, reverts on reboot)

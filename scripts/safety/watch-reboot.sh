@@ -98,12 +98,13 @@ while (( $(elapsed) < TIMEOUT )); do
         # kernel version as the candidate, both slots report identical uname output. On tib
         # the slot is readable from /proc/cmdline, so report that instead of inferring.
         ok "kernel matches --expect"
+        # piv/tib mark the slot rtpi.slot=…; vip marks it vipboot.slot=… (rtpi's vip-boot).
         SLOT=$(ssh "${SSH_OPTS[@]}" -o ConnectTimeout=6 "${LAST_PATH:-$SSH_HOST}" \
-               "grep -o 'rtpi.slot=[a-z-]*' /proc/cmdline 2>/dev/null" || true)
+               "grep -oE '(rtpi|vipboot)\.slot=[a-z-]*' /proc/cmdline 2>/dev/null" || true)
         if [[ -n $SLOT ]]; then
-          ok "booted slot: ${SLOT#rtpi.slot=}"
+          ok "booted slot: ${SLOT#*.slot=}"
         else
-          warn "no rtpi.slot marker on the kernel cmdline — cannot tell which slot booted"
+          warn "no slot marker on the kernel cmdline — cannot tell which slot booted"
         fi
         echo "$kernel"; exit 0
       else
