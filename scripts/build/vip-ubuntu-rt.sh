@@ -323,6 +323,10 @@ if [[ ${TRIM:-1} == 1 && -s /out/proc-modules ]]; then
   done < /out/proc-modules
   (( missing == 0 )) || { echo "!!! module coverage FAILED -- this kernel would lose a driver the board uses" >&2; exit 1; }
   echo "    [ok] all $(wc -l < /out/proc-modules) modules the board loads are present or built in"
+  # The deploy script's own gate needs the same list of recorded removals, so it ships beside
+  # the kernel: the build is the one place this judgement is made, and a copied list would
+  # drift.
+  if [[ -n $TRIMMED_OK ]]; then printf '%s\n' $TRIMMED_OK > /out/trimmed-ok.txt; else : > /out/trimmed-ok.txt; fi
 fi
 
 # The strip actually happened, on the files about to be shipped, not on the variables that

@@ -3,6 +3,8 @@ arch/arm64/crypto/aes-neon-blk
 arch/arm64/crypto/aes-neon-bs
 arch/arm64/crypto/ghash-ce
 configs
+crypto/af_alg
+crypto/algif_hash
 crypto/cmac
 crypto/sm4
 crypto/sm4_generic

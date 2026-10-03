@@ -7,6 +7,14 @@
 # kernel rebuild before it could even try. Its media-controller sub-option and the usbmidi
 # library ride along as dependencies; the fragment only sets the one module symbol.
 CONFIG_SND_USB_AUDIO=m
+# inet_diag, tcp_diag, mptcp_diag — loaded on demand by ss and friends, and ss is literally
+# inside vip-boot-validate. Whether the trim keeps them therefore depends on what happened to
+# be loaded when /proc/modules was fetched: the first trimmed build had all three, and a
+# rebuild later the same day (nothing using ss at fetch time) dropped them. Keep them so the
+# diagnostics — and the validate hook — never depend on the fetch-day load state.
+CONFIG_INET_DIAG=m
+CONFIG_INET_TCP_DIAG=m
+CONFIG_INET_MPTCP_DIAG=m
 #
 # Note on ac97_bus and snd_compress: the board loads both, but only as dependency edges out
 # of snd-soc-core (its selectors, SND_SOC_AC97_BUS and SND_SOC_COMPRESS, were on because of

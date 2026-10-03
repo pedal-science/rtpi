@@ -44,6 +44,7 @@ dev_ssh "sudo bash -euo pipefail -s" <<REMOTE
 REL=$RELEASE
 STOCK=$STOCK
 KIND=$(cat "$OUT/build-kind" 2>/dev/null || echo full)
+TRIMMED_OK="$(cat "$OUT/trimmed-ok.txt" 2>/dev/null)"
 
 mkdir -p /tmp/rtpi-vip
 mv /tmp/boot-\$REL.tar.gz /tmp/modules-\$REL.tar.gz /tmp/bcm2712-rpi-5-b.dtb.sha256 /tmp/rtpi-vip/
@@ -78,6 +79,17 @@ else
     sed 's|.*/||; s/\.ko$//' "/lib/modules/\$REL/modules.builtin" 2>/dev/null | tr '-' '_'; } \
     | sort -u > /tmp/rtpi-vip/have-modules.txt
   comm -23 /tmp/rtpi-vip/loaded-modules.txt /tmp/rtpi-vip/have-modules.txt > /tmp/rtpi-vip/missing-modules.txt || true
+  # The build's own coverage gate records deliberate removals (loaded only as dependency
+  # edges that the trim dissolves; see scripts/build/vip-ubuntu-rt.sh, TRIMMED_OK). They ship
+  # in trimmed-ok.txt and are expected to be absent here.
+  if [[ -n "\$TRIMMED_OK" ]]; then
+    printf '%s\n' \$TRIMMED_OK | sed '/^[[:space:]]*$/d' > /tmp/rtpi-vip/trimmed-ok.txt
+    if comm -12 /tmp/rtpi-vip/missing-modules.txt /tmp/rtpi-vip/trimmed-ok.txt | grep -q .; then
+      echo "recorded removals (expected absent): \$(comm -12 /tmp/rtpi-vip/missing-modules.txt /tmp/rtpi-vip/trimmed-ok.txt | tr '\n' ' ')"
+      comm -23 /tmp/rtpi-vip/missing-modules.txt /tmp/rtpi-vip/trimmed-ok.txt > /tmp/rtpi-vip/missing2.txt
+      mv /tmp/rtpi-vip/missing2.txt /tmp/rtpi-vip/missing-modules.txt
+    fi
+  fi
   if [[ -s /tmp/rtpi-vip/missing-modules.txt ]]; then
     echo "!!! these modules the board loads are missing from the trimmed tree:" >&2
     cat /tmp/rtpi-vip/missing-modules.txt >&2
