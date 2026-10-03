@@ -1,0 +1,15 @@
+# What a trimmed vip build keeps loadable even though the board does not load it today.
+# Applied by scripts/build/vip-ubuntu-rt.sh after `make localmodconfig` (the trim), the way
+# tib-rt.sh's keep-list works: each line is a deliberate exception, with a reason.
+#
+# snd-usb-audio — the bench and soak history was built on USB interfaces (the SSL 2+ on piv),
+# and a future measurement on vip may use one. Without this module such a box would need a
+# kernel rebuild before it could even try. Its media-controller sub-option and the usbmidi
+# library ride along as dependencies; the fragment only sets the one module symbol.
+CONFIG_SND_USB_AUDIO=m
+#
+# Note on ac97_bus and snd_compress: the board loads both, but only as dependency edges out
+# of snd-soc-core (its selectors, SND_SOC_AC97_BUS and SND_SOC_COMPRESS, were on because of
+# codec drivers the trim removes). In the trimmed kernel snd-soc-core has no ac97/compress
+# references at all (verified: zero undefined symbols), so the modules would never load and
+# are recorded as deliberate removals in the build script's TRIMMED_OK, not kept here.

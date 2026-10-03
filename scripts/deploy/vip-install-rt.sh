@@ -43,6 +43,7 @@ ok "artifacts uploaded"
 dev_ssh "sudo bash -euo pipefail -s" <<REMOTE
 REL=$RELEASE
 STOCK=$STOCK
+KIND=$(cat "$OUT/build-kind" 2>/dev/null || echo full)
 
 mkdir -p /tmp/rtpi-vip
 mv /tmp/boot-\$REL.tar.gz /tmp/modules-\$REL.tar.gz /tmp/bcm2712-rpi-5-b.dtb.sha256 /tmp/rtpi-vip/
@@ -55,21 +56,36 @@ tar -C / -xzf "/tmp/rtpi-vip/modules-\$REL.tar.gz"
 [[ -s "/lib/modules/\$REL/modules.dep" ]] || { echo "no modules.dep — modules_install did not finish"; exit 1; }
 echo "modules in place: \$(find /lib/modules/\$REL -name '*.ko' | wc -l) .ko files"
 
-# Every module the stock kernel ships must exist in the new tree. This catches a module
-# make silently dropped (it happened once, mid-deploy development: four netfilter .ko lost
-# to a disk-full link failure that the next make never re-linked). Name-based, because the
-# strip and the module signing make byte-comparison meaningless.
-comm -13 \
-  <(find "/lib/modules/\$REL/kernel" -name '*.ko' -printf '%f\n' | sed 's/\.ko$//' | sort -u) \
-  <(find "/lib/modules/\$STOCK/kernel" -name '*.ko*' -printf '%f\n' | sed 's/\.ko.*//' | sort -u) \
-  > /tmp/rtpi-vip/missing-modules.txt || true
-if [[ -s /tmp/rtpi-vip/missing-modules.txt ]]; then
-  echo "!!! these stock modules are missing from the new tree:" >&2
-  cat /tmp/rtpi-vip/missing-modules.txt >&2
-  rm -rf "/lib/modules/\$REL"
-  exit 1
+# Module set checks. A full build must carry exactly the stock kernel's modules (this caught
+# four netfilter .ko make silently dropped once, mid-deploy development). A trimmed build is
+# deliberately a subset, so its gate is the real invariant instead: every module the board
+# loads must be a .ko in the new tree or built in (modules.builtin).
+if [[ "\$KIND" == "full" ]]; then
+  comm -13 \
+    <(find "/lib/modules/\$REL/kernel" -name '*.ko' -printf '%f\n' | sed 's/\.ko$//' | sort -u) \
+    <(find "/lib/modules/\$STOCK/kernel" -name '*.ko*' -printf '%f\n' | sed 's/\.ko.*//' | sort -u) \
+    > /tmp/rtpi-vip/missing-modules.txt || true
+  if [[ -s /tmp/rtpi-vip/missing-modules.txt ]]; then
+    echo "!!! these stock modules are missing from the new tree:" >&2
+    cat /tmp/rtpi-vip/missing-modules.txt >&2
+    rm -rf "/lib/modules/\$REL"
+    exit 1
+  fi
+  echo "module set matches the stock kernel's"
+else
+  cat /proc/modules | awk '{print \$1}' | sort -u > /tmp/rtpi-vip/loaded-modules.txt
+  { find "/lib/modules/\$REL/kernel" -name '*.ko' -printf '%f\n' | sed 's/\.ko$//' | tr '-' '_';
+    sed 's|.*/||; s/\.ko$//' "/lib/modules/\$REL/modules.builtin" 2>/dev/null | tr '-' '_'; } \
+    | sort -u > /tmp/rtpi-vip/have-modules.txt
+  comm -23 /tmp/rtpi-vip/loaded-modules.txt /tmp/rtpi-vip/have-modules.txt > /tmp/rtpi-vip/missing-modules.txt || true
+  if [[ -s /tmp/rtpi-vip/missing-modules.txt ]]; then
+    echo "!!! these modules the board loads are missing from the trimmed tree:" >&2
+    cat /tmp/rtpi-vip/missing-modules.txt >&2
+    rm -rf "/lib/modules/\$REL"
+    exit 1
+  fi
+  echo "trimmed tree covers every module the board loads"
 fi
-echo "module set matches the stock kernel's"
 
 # /boot: the names vip-boot try-kernel's copy_kernel reads.
 tar -C /tmp/rtpi-vip -xzf "/tmp/rtpi-vip/boot-\$REL.tar.gz"
