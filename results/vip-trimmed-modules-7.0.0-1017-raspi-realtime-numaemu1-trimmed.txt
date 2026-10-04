@@ -3,11 +3,7 @@ arch/arm64/crypto/aes-neon-blk
 arch/arm64/crypto/aes-neon-bs
 arch/arm64/crypto/ghash-ce
 configs
-crypto/af_alg
-crypto/algif_hash
 crypto/cmac
-crypto/sm4
-crypto/sm4_generic
 drivers/base/regmap/regmap-i2c
 drivers/base/regmap/regmap-spi
 drivers/bluetooth/btbcm
@@ -74,6 +70,7 @@ drivers/rtc/rtc-rpi
 drivers/spi/spi-bcm2835
 drivers/spi/spidev
 drivers/tty/serial/8250/8250_bcm7271
+drivers/usb/class/cdc-acm
 drivers/usb/common/ulpi
 drivers/usb/dwc3/dwc3
 drivers/usb/host/xhci-plat-hcd

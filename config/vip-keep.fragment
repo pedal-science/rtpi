@@ -7,6 +7,14 @@
 # kernel rebuild before it could even try. Its media-controller sub-option and the usbmidi
 # library ride along as dependencies; the fragment only sets the one module symbol.
 CONFIG_SND_USB_AUDIO=m
+# cdc_acm — the Pico's USB console. The Pico 2 W sits on vip's USB on the bench (2e8a:0009,
+# "Raspberry Pi Pico", three interfaces: CDC comm, CDC data, vendor), and its firmware puts the
+# debug console on USB CDC while the pedal's protocol link stays on the header UART
+# (pedal.project firmware/CMakeLists.txt, docs/uart-protocol.md). This is the one keep-list
+# entry that could never survive the trim on its own: while the module is absent nothing binds
+# the Pico, so cdc_acm can never appear in the board's /proc/modules — a self-fulfilling
+# absence, the same shape as the inet_diag note below.
+CONFIG_USB_ACM=m
 # inet_diag, tcp_diag, mptcp_diag — loaded on demand by ss and friends, and ss is literally
 # inside vip-boot-validate. Whether the trim keeps them therefore depends on what happened to
 # be loaded when /proc/modules was fetched: the first trimmed build had all three, and a
