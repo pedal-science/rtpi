@@ -168,6 +168,50 @@ class TestImage(FakeVip):
             self.assertTrue(c.startswith("root=LABEL=pedal "))
             self.assertEqual(c.count("\n"), 1)
 
+    # --- both slots filled: the pedal's kernel and the stock fallback -------------------------
+    def init_with_fallback(self, fallback=NEW, release=OLD, check=True):
+        return self.run_vb("init-pedal-boot", "--dir", self.boot, "--kernel-root", self.root,
+                           "--release", release, "--fallback-release", fallback, check=check)
+
+    def test_fallback_slot_is_a_complete_slot(self):
+        self.init_with_fallback()
+        self.assertEqual(self.profile(), ("a", "tuned"))
+        self.assertEqual((self.state("a"), self.state("b")), ("good", "good"))
+        self.assertEqual(self.read(f"{self.boot}/a/kernel.release").strip(), OLD)
+        self.assertEqual(self.read(f"{self.boot}/b/kernel.release").strip(), NEW)
+        for f in ("vmlinuz", "initrd.img", "bcm2712-rpi-5-b.dtb", "cmdline-tuned.txt",
+                  "cmdline-loose.txt", "tuned.args"):
+            self.assertTrue(os.path.exists(f"{self.boot}/b/{f}"), f)
+        self.assertTrue(os.path.exists(f"{self.boot}/b/overlays/vc4-kms-v3d.dtbo"))
+        b = self.read(f"{self.boot}/b/cmdline-tuned.txt")
+        self.assertIn("vipboot.slot=b", b)
+        self.assertIn(self.env["AUDIO_TUNING_ARGS"], b)
+
+    def test_the_fallback_can_be_tried_and_promoted(self):
+        """The whole point of filling it at image build: a validated way back to a kernel that
+        is known to work, without a card reader."""
+        self.init_with_fallback()
+        self.run_vb("try-kernel", NEW, "--no-reboot")
+        self.assertEqual(self.armed(), ["os_prefix=b/"])
+        self.assertEqual(self.state("b"), "trying")
+        self.boot_as(slot="b", tryboot=True)
+        self.run_vb("validate")
+        self.assertEqual(self.profile(), ("b", "tuned"))
+        self.assertEqual((self.state("a"), self.state("b")), ("good", "good"))
+        self.assertEqual(self.read(f"{self.boot}/a/kernel.release").strip(), OLD)
+        self.assertEqual(self.read(self.root + "/validated").strip(), NEW)
+
+    def test_fallback_must_differ_from_the_pedal_kernel(self):
+        r = self.init_with_fallback(fallback=OLD, release=OLD, check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("fallback release is the pedal's own", r.stderr)
+
+    def test_fallback_must_be_installed_in_the_root(self):
+        r = self.run_vb("init-pedal-boot", "--dir", self.boot, "--kernel-root", self.root,
+                        "--release", OLD, "--fallback-release", "9.9.9-nope", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotEqual(self.state("b"), "good", "a slot that was never filled is not good")
+
     def test_fixed_sizes(self):
         self.assertEqual(self.sizes()[f"{self.boot}/profile.txt"], vb.SMALL)
         self.assertEqual(self.sizes()[f"{self.bootsel}/vipboot/count"], vb.COUNT_W)

@@ -30,3 +30,7 @@ results/raw/
 scratch/
 sources/
 work/
+
+# Python bytecode from the test suite (tests/vip-boot/ and its loader).
+__pycache__/
+*.pyc

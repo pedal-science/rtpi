@@ -8,10 +8,12 @@
 # read off the board), so the rebuild differs from what runs today by the fragment alone.
 #
 # WHERE THE CONFIG COMES FROM
-# The running kernel's own /boot/config-*, pulled off the board — the configuration that
-# demonstrably boots this exact hardware. olddefconfig applies it to the matching source, then
-# the fragment flips NUMA emulation on. The script prints the whole config delta; it must be
-# exactly CONFIG_NUMA_EMU and CONFIG_LOCALVERSION, or something unexpected drifted.
+# FALLBACK_KERNEL's own /boot/config-*, pulled off the board — the stock configuration that
+# demonstrably boots this exact hardware, and the one the spare slot keeps booting. The board must
+# be running the stock kernel or a rebuild of it (this script's own releases). olddefconfig applies
+# the config to the matching source, then the fragment flips NUMA emulation on. The script prints
+# the whole config delta; it must be exactly CONFIG_NUMA_EMU and CONFIG_LOCALVERSION, or something
+# unexpected drifted.
 #
 # WHY A SEPARATE RELEASE STRING
 # Kernel slots are A/B but /lib/modules is NOT: the known-good slot is a copy of vmlinuz,
@@ -20,6 +22,18 @@
 # stock kernel's "-1017-raspi-realtime" came from Ubuntu's build machinery, not from
 # CONFIG_LOCALVERSION (the shipped config has it empty), so this build sets the whole string
 # and asserts `make kernelrelease` against it.
+#
+# WHAT IT BUILDS, AND FROM WHAT BASELINE
+# The target release is FALLBACK_KERNEL plus a suffix, and the default suffix is PEDAL_KERNEL's own:
+# running this with no arguments rebuilds exactly the release the card image pins (pedal.project
+# devices/vip/image.lock). A new trial gets its own suffix instead (--localversion
+# -numaemu2-trimmed) and goes through `make vip-try` like any candidate before anything pins it.
+#
+# WHAT IT LEAVES BEHIND
+# build/vip/: the two tarballs, kernelrelease, build-kind, trimmed-ok.txt, proc-modules, the dtb
+# hash, and — so that every binary carries its commit — built-from (this repo's commit, -dirty if
+# the tree was dirty) and sha256sums over what the card image verifies and pins before it installs
+# them.
 #
 # WHY NUMA EMULATION AT ALL
 # Fake NUMA needs CONFIG_NUMA_EMU; the boot argument alone is not enough (see
@@ -64,19 +78,20 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 || die "image $IMAGE missing. Run:
 [[ -n $JOBS ]] || JOBS=$(docker run --rm "$IMAGE" nproc)
 mkdir -p "$OUT"
 
-# The board's own working config, fetched fresh rather than kept in the repo, so it always
-# matches whatever is actually running. The running kernel must be the recorded pedal kernel or
-# a suffixed rebuild of it (this script's own -numaemu1/-trimmed releases); anything else is a
-# surprise, not a base to build on.
+# The config comes from the STOCK kernel (FALLBACK_KERNEL), fetched fresh rather than kept in the
+# repo. Deliberately not from whatever is running: a rebuild's config already carries the fragment
+# and the trim, so a delta asserted against it would be empty and mean nothing. The stock package
+# stays installed in the root for the life of the card — it is what the spare slot boots — so this
+# is always there.
 require_ssh
 RUNNING=$(dev_ssh 'uname -r')
 case "$RUNNING" in
-  "$PEDAL_KERNEL"|"$PEDAL_KERNEL"-*) : ;;
-  *) die "vip runs $RUNNING, not the recorded $PEDAL_KERNEL or a suffixed rebuild of it — refusing to build against a surprise kernel" ;;
+  "$FALLBACK_KERNEL"|"$FALLBACK_KERNEL"-*) : ;;
+  *) die "vip runs $RUNNING, not the recorded stock $FALLBACK_KERNEL or a rebuild of it — refusing to build against a surprise kernel" ;;
 esac
-dev_ssh "cat /boot/config-$RUNNING" > "$OUT/base.config" \
-  || die "could not fetch /boot/config-$RUNNING"
-ok "base config: $RUNNING ($(wc -l < "$OUT/base.config") lines)"
+dev_ssh "cat /boot/config-$FALLBACK_KERNEL" > "$OUT/base.config" \
+  || die "could not fetch /boot/config-$FALLBACK_KERNEL: the stock kernel has to stay installed on $SSH_HOST"
+ok "base config: $FALLBACK_KERNEL ($(wc -l < "$OUT/base.config") lines)"
 
 # The loaded-module list, fetched from the board for the same reason as the config: it always
 # matches what is actually running. /proc/modules rather than lsmod, because that is the format
@@ -90,25 +105,29 @@ fi
 # The Ubuntu source tag for the installed package: version 7.0.0-1017.17 -> Ubuntu-raspi-7.0.0-1017.17.
 # Read from the STOCK package, not from the running release: a suffixed rebuild has no package
 # of its own, but it was built from this tag.
-PKG_VER=$(dev_ssh "dpkg-query -W -f='\${Version}' linux-image-$PEDAL_KERNEL")
+PKG_VER=$(dev_ssh "dpkg-query -W -f='\${Version}' linux-image-$FALLBACK_KERNEL")
 [[ $PKG_VER =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.[0-9]+$ ]] || die "unexpected package version: $PKG_VER"
 TAG="Ubuntu-raspi-$PKG_VER"
-log "source tag for $RUNNING ($PKG_VER): $TAG"
+log "source tag for $FALLBACK_KERNEL ($PKG_VER): $TAG"
 # The ^{} form peels an annotated tag to its commit: ls-remote prints two lines for one, and
 # the tag object's own hash is not the commit to build (or to verify against).
 TAG_COMMIT=$(git ls-remote "https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux-raspi/+git/resolute" "refs/tags/$TAG^{}" | awk '{print $1}')
 [[ -n $TAG_COMMIT ]] || die "no commit found for tag $TAG"
 ok "tag $TAG -> $TAG_COMMIT"
 
-# The suffix is relative to the RUNNING kernel: an untrimmed build reproduces exactly the
-# release the board runs now, and a trimmed build adds -trimmed on top of that. --localversion
-# overrides the whole suffix. Two different module sets must not share a release name, which
-# is why the trim is in the name.
+# The release is the STOCK string plus a suffix, and the default suffix is the pedal kernel's own:
+# with no arguments this rebuilds exactly the release the card image pins. Two different module
+# sets must not share a release name, which is why the trim is in the name and why a full build
+# over a trimmed name is refused rather than silently done.
 if (( ! SUFFIX_EXPLICIT )); then
-  SUFFIX="${RUNNING#"$PEDAL_KERNEL"}"
-  [[ $TRIM == 1 && $SUFFIX != *-trimmed* ]] && SUFFIX="${SUFFIX}-trimmed"
+  SUFFIX="${PEDAL_KERNEL#"$FALLBACK_KERNEL"}"
 fi
-KREL_EXPECT="${PEDAL_KERNEL}${SUFFIX}"
+if (( TRIM )) && [[ $SUFFIX != *-trimmed* ]]; then
+  SUFFIX="${SUFFIX}-trimmed"
+elif (( ! TRIM )) && [[ $SUFFIX == *-trimmed* ]]; then
+  die "--no-trim would rebuild the trimmed name $FALLBACK_KERNEL$SUFFIX: pass --localversion"
+fi
+KREL_EXPECT="${FALLBACK_KERNEL}${SUFFIX}"
 printf '%s\n' "$([[ $TRIM == 1 ]] && echo trimmed || echo full)" > "$OUT/build-kind"
 log "target release: $KREL_EXPECT (building with -j$JOBS, modules: $([[ $TRIM == 1 ]] && echo trimmed || echo full))"
 
@@ -355,6 +374,15 @@ fi
 [[ -n $KREL ]] || die "build did not produce a kernel release string"
 [[ $KREL == "$KREL_EXPECT" ]] || die "build produced $KREL, expected $KREL_EXPECT"
 
-ok "built $KREL"
+# Every binary carries its commit. The artefacts are what the card image pins by hash
+# (pedal.project devices/vip/image.lock), and a kernel is not bit-reproducible by construction —
+# its config baseline is the board's, its trim is driven by the board's /proc/modules — so the
+# commit and the hashes are the record that makes the artefact defensible rather than magic.
+COMMIT=$(git -C "$RTPI_ROOT" rev-parse HEAD)
+[[ -z $(git -C "$RTPI_ROOT" status --porcelain) ]] || COMMIT="$COMMIT-dirty"
+printf '%s\n' "$COMMIT" > "$OUT/built-from"
+( cd "$OUT" && shasum -a 256 "boot-$KREL.tar.gz" "modules-$KREL.tar.gz" bcm2712-rpi-5-b.dtb.sha256 > sha256sums )
+
+ok "built $KREL from $COMMIT"
 ls -lh "$OUT"/*.tar.gz 2>/dev/null | awk '{print "    "$5"  "$9}' >&2
-log "next: scripts/deploy/vip-install-rt.sh (installs beside the stock kernel), then make vip-try"
+log "next: scripts/deploy/vip-install-rt.sh (installs beside the stock $FALLBACK_KERNEL), then make vip-try"

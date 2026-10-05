@@ -66,6 +66,34 @@ symlinks (which Armbian's postinst keeps pointing at the newest kernel), and the
 **known-good** is a frozen copy we make (`*-good`). So a routine Armbian kernel upgrade
 can never silently become the default boot.
 
+### vip — two slots, and a pedal kernel that is not a package
+
+vip is built from an image, not upgraded with apt (pedal.project, `docs/vip-image.md`), so
+`flash-kernel` and `piboot-try` do not apply: `vip-boot` owns the same firmware-level job, with
+two fixed slots in the pedal's boot partition instead of `current`/`new`/`old` directories.
+
+The pedal's kernel is Ubuntu's `linux-raspi` **rebuilt** — NUMA emulation on, modules trimmed to
+what the board loads — which exists in no archive and so cannot come from a package:
+
+```
+make vip-rt          # scripts/build/vip-ubuntu-rt.sh: build/vip/{boot,modules}-<rel>.tar.gz,
+                     #   kernelrelease, build-kind, trimmed-ok.txt, proc-modules, built-from, sha256sums
+make vip-install-rt  # scripts/deploy/vip-install-rt.sh: install it into the RUNNING pedal root,
+                     #   beside the stock kernel, with a guarded initramfs (vip-install-kernel does
+                     #   the work; pedal.project's image build runs the same script in its chroot)
+make vip-try         # vip-boot try-kernel: fill the SPARE slot, reboot once, watch validation
+                     #   promote it or fall back
+```
+
+The stock kernel stays installed — it is the baseline the rebuild is measured against, and slot b
+boots it, so `vip-boot try-kernel 7.0.0-1017-raspi-realtime` is a validated way back from a pedal
+kernel that will not come up. A card written by pedal.project's `make-card` carries both slots:
+slot a the rebuild (from the artefacts above, pinned by hash in `devices/vip/image.lock`), slot b
+the stock kernel, both `good`. Nothing about a rebuild reaches the board by apt, and a rebuilt
+kernel with the same release string is a different kernel — the release string is the only thing
+that separates two module sets, which is why trials get their own suffix
+(`--localversion -numaemu2-trimmed`) and go through `vip-try` before anything pins them.
+
 ## tib bring-up from a fresh Armbian install
 
 Every step below is a script in this repo. Run them in this order; each one refuses to
@@ -584,6 +612,17 @@ audio delta is small, and most of the remaining win is cmdline and runtime tunin
 Source is Format 1.0: `.orig.tar.gz` + `.diff.gz`, no `.debian.tar.xz`. Config comes from
 `debian.raspi/config/annotations`, not `config.flavour.*`. Note `7.0.0-1017.17` is in
 `resolute-updates`/`resolute-security`, **not** the plain `resolute` pocket.
+
+**vip** — the same `linux-raspi` source and the same `raspi-realtime` flavour as piv, rebuilt from
+the tag the stock package was built from (`Ubuntu-raspi-<abi>.<upload>`, read off the board) with
+one delta: `config/vip-numa-emu.fragment` turns `CONFIG_NUMA_EMU` on, which cannot be set at boot
+(the stock kernel answers `Malformed early option 'numa'`), and the module set is trimmed to what
+the board loads plus `config/vip-keep.fragment`'s deliberate exceptions. The config baseline is
+always the **stock** kernel's `/boot/config-*`, never the running rebuild's: a rebuild's config
+already carries the fragment and the trim, so a delta measured against it would be empty. The
+build asserts the delta is exactly `CONFIG_NUMA_EMU` and `CONFIG_LOCALVERSION`, that every module
+the board loads is present or built in (minus `trimmed-ok.txt`), that the modules are stripped,
+and that `make kernelrelease` is the string it meant to build.
 
 **tib** — ARM32 PREEMPT_RT became available in mainline **v7.1** (commit `c6e61c06d606`,
 *"ARM: 9463/1: Allow to enable RT"*). Three follow-up fixes missed 7.2 but landed in

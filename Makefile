@@ -114,11 +114,11 @@ piv-apt-rt: ## Install Ubuntu's linux-raspi-realtime on piv via the tryboot path
 
 ## vip — the pedal Core host: rebuild its Ubuntu kernel with NUMA emulation (config/vip-numa-emu.fragment)
 .PHONY: vip-rt
-vip-rt: ## 1. Build vip's kernel (Ubuntu linux-raspi tag from the board + the fragment)
+vip-rt: ## 1. Build vip's pedal kernel (stock baseline + the fragment) into build/vip
 	$(SCRIPTS)/build/vip-ubuntu-rt.sh
 
 .PHONY: vip-install-rt
-vip-install-rt: ## 2. Install the built kernel into the running pedal root (modules, /boot, guarded initrd)
+vip-install-rt: ## 2. Install it into the running pedal root, beside the stock kernel
 	$(SCRIPTS)/deploy/vip-install-rt.sh
 
 .PHONY: vip-try

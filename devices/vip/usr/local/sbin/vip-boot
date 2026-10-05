@@ -19,7 +19,7 @@
 
   run by the image build (pedal.project), with --dir pointing at the partition's staging directory:
     vip-boot init-bootsel --dir D
-    vip-boot init-pedal-boot --dir D --kernel-root R --release REL [--config-extra F]
+    vip-boot init-pedal-boot --dir D --kernel-root R --release REL [--fallback-release REL2] [--config-extra F]
     vip-boot init-rescue-boot --dir D --kernel-root R --release REL [--config-extra F]
 
 HOW IT WORKS (docs/vip-image.md in pedal.project has the reasons)
@@ -34,7 +34,10 @@ The pedal's config.txt is written once and never again. It includes two small fi
     [tryboot]   include tryboot.txt    whatever the next one-shot should change
 
 Kernels live in two fixed slots, a/ and b/. profile.txt names the active one; the other holds the
-previous kernel, or a candidate while one is tried. Promoting a candidate is one rewrite of
+previous kernel, or a candidate while one is tried. A card can also be written with both slots
+filled — the pedal's kernel and a known-good fallback (init-pedal-boot --fallback-release) —
+because on vip the pedal's kernel is a rebuild that is in no archive, and a kernel that will not
+come up has to have something to fall back to. Promoting a candidate is one rewrite of
 profile.txt, not a rename of directories, so no moment exists at which the card has no kernel to
 boot.
 
@@ -682,6 +685,19 @@ def cmd_init_pedal_boot(env, args):
         write_new(os.path.join(board.slot_dir(s), "state"), state_text("empty"))
     fill_slot(board, first, args.release, env["AUDIO_TUNING_ARGS"], kernel_root=args.kernel_root)
     board.set_state(first, "good")
+    # The spare slot, with a known-good kernel the same validation can promote: the pedal's kernel
+    # on vip is a rebuild that is in no archive (pedal.project docs/vip-kernel-image.md), so the
+    # card ships the stock one beside it rather than leaving the spare empty.
+    if args.fallback_release:
+        if not others:
+            die(f"{env['SLOTS']} names one slot: there is no spare for a fallback kernel")
+        if args.fallback_release == args.release:
+            die(f"the fallback release is the pedal's own ({args.release})")
+        fill_slot(board, others[0], args.fallback_release, env["AUDIO_TUNING_ARGS"],
+                  kernel_root=args.kernel_root)
+        board.set_state(others[0], "good")
+        log(f"slot {others[0]}: {args.fallback_release} (fallback, good); "
+            f"slot {first}: {args.release} (active)")
 
 
 def cmd_init_rescue_boot(env, args):
@@ -720,10 +736,14 @@ def main(argv=None):
     s.add_argument("--require-unit"); s.add_argument("--wait", type=int, default=120)
     s.add_argument("--settle", type=int, default=10)
     s = sub.add_parser("init-bootsel"); s.add_argument("--dir", required=True)
-    for name in ("init-pedal-boot", "init-rescue-boot"):
-        s = sub.add_parser(name)
-        s.add_argument("--dir", required=True); s.add_argument("--kernel-root", required=True)
-        s.add_argument("--release", required=True); s.add_argument("--config-extra")
+    s = sub.add_parser("init-pedal-boot")
+    s.add_argument("--dir", required=True); s.add_argument("--kernel-root", required=True)
+    s.add_argument("--release", required=True); s.add_argument("--config-extra")
+    s.add_argument("--fallback-release",
+                   help="a second kernel for the spare slot, good and ready to be tried")
+    s = sub.add_parser("init-rescue-boot")
+    s.add_argument("--dir", required=True); s.add_argument("--kernel-root", required=True)
+    s.add_argument("--release", required=True); s.add_argument("--config-extra")
     args = ap.parse_args(argv)
 
     env = read_env(args.env)
