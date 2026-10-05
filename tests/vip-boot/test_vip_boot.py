@@ -54,8 +54,10 @@ class FakeVip(unittest.TestCase):
         # The partitions, as the image build makes them.
         self.bootsel = r + self.env["BOOTSEL_MOUNT"]
         self.boot = r + self.env["PEDAL_BOOT_MOUNT"]
+        self.rescue = f"{r}/boot/rescue-boot"   # the rescue partition is mounted only when booting it
         self.run_vb("init-bootsel", "--dir", self.bootsel)
         self.run_vb("init-pedal-boot", "--dir", self.boot, "--kernel-root", r, "--release", OLD)
+        self.run_vb("init-rescue-boot", "--dir", self.rescue, "--kernel-root", r, "--release", OLD)
         self.boot_as(slot="a", profile="tuned", tryboot=False)
 
     def tearDown(self):
@@ -152,6 +154,15 @@ class TestImage(FakeVip):
         # the kernel settings apply to every boot, not only tryboot ones
         tail = cfg[cfg.index("include tryboot.txt"):]
         self.assertLess(tail.index("[all]"), tail.index("kernel=vmlinuz"))
+        # The Pico's link UART, for every boot: the stock DT ships RP1's UART0 disabled, and
+        # enable_uart=1 alone left the pedal without /dev/ttyAMA0 after a card rewrite
+        # (pedal.project bench-results/2026-10-05-header-uart-disabled.md).
+        self.assertIn("enable_uart=1", tail)
+        self.assertIn("dtoverlay=uart0", tail)
+        rescue = self.read(f"{self.rescue}/config.txt")
+        self.assertIn("enable_uart=1", rescue)
+        self.assertIn("dtoverlay=uart0", rescue)
+        self.assertIn("cmdline=cmdline.txt", rescue)
         a = f"{self.boot}/a"
         self.assertTrue(os.path.exists(f"{a}/bcm2712-rpi-5-b.dtb"))
         self.assertFalse(os.path.exists(f"{a}/bcm2711-rpi-4-b.dtb"))

@@ -667,6 +667,14 @@ kernel=vmlinuz
 initramfs initrd.img followkernel
 dtparam=watchdog=on
 enable_uart=1
+# The Pico's link UART: header pins 8 and 10, RP1's UART0. The stock device tree ships that
+# node disabled, and `enable_uart=1` on its own stopped being enough after a card rewrite on
+# 2026-10-05 — the pedal came up with no /dev/ttyAMA0 and pedald retried for the whole boot
+# (pedal.project bench-results/2026-10-05-header-uart-disabled.md). `dtoverlay=uart0` picks
+# uart0-pi5.dtbo here, which sets the node okay and the same pinctrl-0 the pedal's own overlay
+# does. Belt and braces on purpose: pedal-uart.service in pedal.project's devices/ tree loads
+# an equivalent overlay at runtime, so a card written before this line still has the link.
+dtoverlay=uart0
 """
 
 
@@ -709,6 +717,10 @@ def cmd_init_rescue_boot(env, args):
               "# The rescue root's boot partition. Nothing here changes after the image build.\n"
               "[all]\narm_64bit=1\nkernel=vmlinuz\ncmdline=cmdline.txt\n"
               "initramfs initrd.img followkernel\ndtparam=watchdog=on\nenable_uart=1\n"
+              # Same reason as the pedal's: the stock DT has UART0 disabled. Not needed for
+              # rescue itself — its console is ttyAMA10 — but it means the header UART can be
+              # watched from rescue, which is where you go when the pedal root is the problem.
+              "dtoverlay=uart0\n"
               + ("\n" + extra if extra else ""))
     write_new(os.path.join(d, "cmdline.txt"), rescue_cmdline(env))
     write_new(os.path.join(d, "kernel.release"), args.release + "\n")
