@@ -32,6 +32,12 @@ make test-tib              # latency and xrun suite; results go to results/
   profile and root; `tests/vip-boot` tests it off the board
   (`python3 -m unittest discover -s tests/vip-boot`, on Linux). The card layout and the reasons
   are in pedal.project's `docs/vip-image.md`.
+  `devices/vip/dt/` holds device-tree overlays the boot partition has to carry, because the
+  firmware applies those from `config.txt` before any driver probes: today
+  `rp1-i2c1-recovery.dts`, which gives the I2C1 controller the `scl-gpios`/`sda-gpios` its driver
+  needs to free a stuck bus (vip had none, so a bus held low needed a reboot — pedal.project
+  `bench-results/2026-10-06-codec-i2c-reads-and-the-sda-hold-time.md`). `vip-boot` has to compile
+  it into both boot partitions' `overlays/` and write the `dtoverlay=` line.
 - On piv: no custom kernel flavour names, no `threadirqs` on an RT kernel,
   `RT_GROUP_SCHED` off. `README.md` "Things that will bite you" says why.
 

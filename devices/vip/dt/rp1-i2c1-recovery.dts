@@ -1,0 +1,79 @@
+// I2C1 bus recovery for vip: let the DesignWare driver free a stuck bus itself.
+//
+// Why this exists. On 2026-10-06 a read of the WM8960 left the RP1 I2C controller holding SDA
+// low, and nothing in the kernel could clear it: the i2c1 node carried no scl-gpios/sda-gpios, so
+// i2c_recover_bus() was a no-op, and the controller's own bus-clear (the DesignWare feature
+// Raspberry Pi's kernels carry) runs only from the abort path while a wedged controller produces
+// timeouts instead. Every transaction timed out after that, the codec's driver could not even
+// issue its reset write, the sound card disappeared, and the pedal needed a reboot. The whole
+// episode, with the measurements, is in
+// pedal.project bench-results/2026-10-06-codec-i2c-reads-and-the-sda-hold-time.md.
+//
+// What it does. Gives the driver the two lines as GPIOs (scl-gpios/sda-gpios) plus a "gpio"
+// pinctrl state — the standard I2C recovery arrangement. i2c_recover_bus() then switches the pins
+// out of the I2C function, bit-bangs nine clocks and a STOP on SCL, and switches back. The driver
+// announces it at probe:
+//
+//     i2c_designware 1f00074000.i2c: running with GPIO recovery mode! scl,sda
+//
+// Why it has to be a boot-time overlay, unlike the pedal's own runtime ones (pedal-uart,
+// pedal-codec): the controller binds during boot, long before any systemd unit runs, and the
+// driver reads these properties exactly once, at probe. An overlay applied later only takes
+// effect after an unbind/bind of 1f00074000.i2c — which is how this was tested, and is not
+// something to do at every boot.
+//
+// Installing it (vip-boot owns the boot partition and writes config.txt once):
+//   1. compile it:  dtc -q -@ -I dts -O dtb -o rp1-i2c1-recovery.dtbo rp1-i2c1-recovery.dts
+//   2. put the .dtbo in the overlays/ directory of *both* boot partitions — the directory
+//      vip-install-kernel fills from the installed kernel package, so this has to be added to
+//      whatever copies that tree (either beside it at image build or by vip-boot);
+//   3. add `dtoverlay=rp1-i2c1-recovery` to the config.txt vip-boot writes, beside the existing
+//      `dtoverlay=uart0` (vip-boot, CONFIG_HEAD). Both slots need it: either can be the one that
+//      boots.
+// With config.txt written once and never again, an existing card picks this up at its next write
+// (or by hand, which is also how the line above can be tested on a card in the field).
+//
+// Verified on vip, 2026-10-06: applied at runtime and the controller re-probed. The driver logged
+// "running with GPIO recovery mode! scl,sda", the codec card came back, and both lines read idle
+// high. The open-drain flags below are accepted by the RP1 GPIO driver (a caution worth keeping:
+// devm_gpiod_get_optional() failing on the SCL line fails the *whole adapter probe*, so a flags
+// value the GPIO controller rejects would cost the codec — this one does not).
+//
+// What has NOT been exercised is the recovery itself: that needs a wedged bus, and the point of
+// this overlay is that the next wedge is the test. Applying it at runtime prints "* Overlay
+// sequence error" from dtoverlay, which is its index bookkeeping clashing with the two overlays
+// the firmware loaded at boot; it is harmless, and it does not arise when the firmware applies
+// this one from config.txt.
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2712";
+
+	/* The RP1 pins in their GPIO function, pulled up: what the recovery drives while it clocks
+	 * the bus free, and what it switches back from afterwards. "default" (the I2C function,
+	 * rp1_i2c1_2_3 in the base tree) stays where it is; this only adds the second state. */
+	fragment@0 {
+		target = <&rp1_gpio>;
+		__overlay__ {
+			i2c1_gpio: i2c1_gpio {
+				pins = "gpio2", "gpio3";
+				function = "gpio";
+				bias-pull-up;
+			};
+		};
+	};
+
+	fragment@1 {
+		target = <&i2c1>;
+		__overlay__ {
+			pinctrl-names = "default", "gpio";
+			pinctrl-1 = <&i2c1_gpio>;
+			/* GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN, spelled as numbers because dtc here has
+			 * no dt-bindings headers to include: 0 | (GPIO_SINGLE_ENDED | GPIO_LINE_OPEN_DRAIN)
+			 * = 6. Open drain is the correct electrical shape for an I2C line. */
+			scl-gpios = <&rp1_gpio 3 6>;
+			sda-gpios = <&rp1_gpio 2 6>;
+		};
+	};
+};
