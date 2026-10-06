@@ -36,8 +36,10 @@ make test-tib              # latency and xrun suite; results go to results/
   firmware applies those from `config.txt` before any driver probes: today
   `rp1-i2c1-recovery.dts`, which gives the I2C1 controller the `scl-gpios`/`sda-gpios` its driver
   needs to free a stuck bus (vip had none, so a bus held low needed a reboot — pedal.project
-  `bench-results/2026-10-06-codec-i2c-reads-and-the-sda-hold-time.md`). `vip-boot` has to compile
-  it into both boot partitions' `overlays/` and write the `dtoverlay=` line.
+  `bench-results/2026-10-06-codec-i2c-reads-and-the-sda-hold-time.md`). `vip-boot init-pedal-boot`
+  and `init-rescue-boot` compile every `.dts` there into each boot tree's `overlays/` and write the
+  matching `dtoverlay=` lines, so the files and the config cannot disagree; a `.dts` that will not
+  compile stops the build. `dtc` is in the build container for that.
 - On piv: no custom kernel flavour names, no `threadirqs` on an RT kernel,
   `RT_GROUP_SCHED` off. `README.md` "Things that will bite you" says why.
 

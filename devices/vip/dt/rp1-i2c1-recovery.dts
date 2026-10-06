@@ -22,16 +22,16 @@
 // effect after an unbind/bind of 1f00074000.i2c — which is how this was tested, and is not
 // something to do at every boot.
 //
-// Installing it (vip-boot owns the boot partition and writes config.txt once):
-//   1. compile it:  dtc -q -@ -I dts -O dtb -o rp1-i2c1-recovery.dtbo rp1-i2c1-recovery.dts
-//   2. put the .dtbo in the overlays/ directory of *both* boot partitions — the directory
-//      vip-install-kernel fills from the installed kernel package, so this has to be added to
-//      whatever copies that tree (either beside it at image build or by vip-boot);
-//   3. add `dtoverlay=rp1-i2c1-recovery` to the config.txt vip-boot writes, beside the existing
-//      `dtoverlay=uart0` (vip-boot, CONFIG_HEAD). Both slots need it: either can be the one that
-//      boots.
-// With config.txt written once and never again, an existing card picks this up at its next write
-// (or by hand, which is also how the line above can be tested on a card in the field).
+// Installing it: vip-boot does it, and this directory is the single home for the fact. Every
+// `*.dts` here is compiled by `vip-boot init-pedal-boot` / `init-rescue-boot` (dtc, at image build)
+// into each boot tree's `overlays/` — both slots of the pedal partition, and rescue's — and each
+// one is enabled with a `dtoverlay=` line in that partition's config.txt, so the files and the
+// config cannot disagree. A card written before this existed needs the same three steps by hand:
+// compile with dtc, copy the .dtbo into `a/overlays/` and `b/overlays/`, and append
+// `dtoverlay=rp1-i2c1-recovery` to the pedal partition's config.txt (and rescue's, if you want it
+// there too). Done by hand on vip on 2026-10-06, which is recorded in pedal.project
+// bench-results/2026-10-06-boot-overlay-installed.md.
+// `device-tree-compiler` is in the build container's packages for step one.
 //
 // Verified on vip, 2026-10-06: applied at runtime and the controller re-probed. The driver logged
 // "running with GPIO recovery mode! scl,sda", the codec card came back, and both lines read idle

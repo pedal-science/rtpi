@@ -56,8 +56,13 @@ class FakeVip(unittest.TestCase):
         self.boot = r + self.env["PEDAL_BOOT_MOUNT"]
         self.rescue = f"{r}/boot/rescue-boot"   # the rescue partition is mounted only when booting it
         self.run_vb("init-bootsel", "--dir", self.bootsel)
-        self.run_vb("init-pedal-boot", "--dir", self.boot, "--kernel-root", r, "--release", OLD)
-        self.run_vb("init-rescue-boot", "--dir", self.rescue, "--kernel-root", r, "--release", OLD)
+        # No --dt-dir for the base partitions: this tree's own overlays need dtc, and only the test
+        # below is about them (it skips where dtc is absent rather than failing the whole suite).
+        self.dt_empty = tempfile.mkdtemp(prefix="vip-dt-empty-")
+        self.run_vb("init-pedal-boot", "--dir", self.boot, "--kernel-root", r, "--release", OLD,
+                    "--dt-dir", self.dt_empty)
+        self.run_vb("init-rescue-boot", "--dir", self.rescue, "--kernel-root", r, "--release", OLD,
+                    "--dt-dir", self.dt_empty)
         self.boot_as(slot="a", profile="tuned", tryboot=False)
 
     def tearDown(self):
@@ -103,6 +108,44 @@ class FakeVip(unittest.TestCase):
         if check and r.returncode:
             self.fail(f"vip-boot {' '.join(args)} failed: {r.stderr}")
         return r
+
+    @unittest.skipUnless(shutil.which("dtc"), "dtc compiles the overlay (build container, or a host)")
+    def test_the_trees_overlays_are_installed_into_every_boot_tree_and_enabled(self):
+        """`devices/vip/dt/*.dts` is the one home for a device-tree fact a driver reads at probe, so
+        it has to be in every boot tree and enabled in that partition's config.txt — a card that
+        comes up without it loses the thing the overlay exists for
+        (pedal.project bench-results/2026-10-06-boot-overlay-installed.md)."""
+        dt = tempfile.mkdtemp(prefix="vip-dt-")
+        with open(os.path.join(dt, "test-recovery.dts"), "w") as f:
+            f.write('/dts-v1/;\n/plugin/;\n/ {\n\tcompatible = "brcm,bcm2712";\n'
+                    '\tfragment@0 {\n\t\ttarget-path = "/";\n\t\t__overlay__ { };\n\t};\n};\n')
+        boot = self.root + "/boot-again"
+        self.run_vb("init-pedal-boot", "--dir", boot, "--kernel-root", self.root,
+                    "--release", OLD, "--fallback-release", NEW, "--dt-dir", dt)
+        for slot in ("a", "b"):
+            self.assertTrue(os.path.exists(f"{boot}/{slot}/overlays/test-recovery.dtbo"),
+                            f"slot {slot} has no overlay")
+        with open(f"{boot}/config.txt") as f:
+            self.assertIn("dtoverlay=test-recovery\n", f.read())
+
+        rescue = self.root + "/rescue-again"
+        self.run_vb("init-rescue-boot", "--dir", rescue, "--kernel-root", self.root,
+                    "--release", OLD, "--dt-dir", dt)
+        self.assertTrue(os.path.exists(f"{rescue}/overlays/test-recovery.dtbo"))
+        with open(f"{rescue}/config.txt") as f:
+            self.assertIn("dtoverlay=test-recovery\n", f.read())
+
+    def test_a_bad_overlay_source_stops_the_card_rather_than_shipping_without_it(self):
+        """Silence here would be a card that boots without the overlay and nobody knows."""
+        if not shutil.which("dtc"):
+            self.skipTest("dtc is not installed")
+        dt = tempfile.mkdtemp(prefix="vip-dt-bad-")
+        with open(os.path.join(dt, "broken.dts"), "w") as f:
+            f.write("this is not a device tree\n")
+        r = self.run_vb("init-rescue-boot", "--dir", self.root + "/rescue-bad",
+                        "--kernel-root", self.root, "--release", OLD, "--dt-dir", dt, check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("dtc failed", r.stderr + r.stdout)
 
     def run_guard(self):
         env = dict(os.environ, VIPGUARD_PREFIX=self.root, VIPGUARD_NO_MOUNT="1",
@@ -182,7 +225,8 @@ class TestImage(FakeVip):
     # --- both slots filled: the pedal's kernel and the stock fallback -------------------------
     def init_with_fallback(self, fallback=NEW, release=OLD, check=True):
         return self.run_vb("init-pedal-boot", "--dir", self.boot, "--kernel-root", self.root,
-                           "--release", release, "--fallback-release", fallback, check=check)
+                           "--release", release, "--fallback-release", fallback,
+                           "--dt-dir", self.dt_empty, check=check)
 
     def test_fallback_slot_is_a_complete_slot(self):
         self.init_with_fallback()
@@ -219,7 +263,8 @@ class TestImage(FakeVip):
 
     def test_fallback_must_be_installed_in_the_root(self):
         r = self.run_vb("init-pedal-boot", "--dir", self.boot, "--kernel-root", self.root,
-                        "--release", OLD, "--fallback-release", "9.9.9-nope", check=False)
+                        "--release", OLD, "--fallback-release", "9.9.9-nope",
+                        "--dt-dir", self.dt_empty, check=False)
         self.assertNotEqual(r.returncode, 0)
         self.assertNotEqual(self.state("b"), "good", "a slot that was never filled is not good")
 

@@ -21,6 +21,8 @@
     vip-boot init-bootsel --dir D
     vip-boot init-pedal-boot --dir D --kernel-root R --release REL [--fallback-release REL2] [--config-extra F]
     vip-boot init-rescue-boot --dir D --kernel-root R --release REL [--config-extra F]
+      (both also compile devices/vip/dt/*.dts into every boot tree's overlays/ and enable them
+       with dtoverlay= lines; --dt-dir overrides where they are read from)
 
 HOW IT WORKS (docs/vip-image.md in pedal.project has the reasons)
 
@@ -63,6 +65,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 PREFIX = os.environ.get("VIPBOOT_PREFIX", "")
@@ -75,6 +78,13 @@ REASON_W = 256   # bootsel vipboot/reason
 
 STATES = ("empty", "staging", "trying", "good", "bad")
 PROFILES = ("tuned", "loose")
+
+
+# This tree's own device-tree overlays: <rtpi>/devices/vip/dt, reached from this file at
+# <rtpi>/devices/vip/usr/local/sbin/vip-boot. The init-* commands compile them into every
+# boot tree and enable them from that partition's config.txt.
+DT_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "..", "..", "..", "dt"))
 
 
 def p(path):
@@ -367,6 +377,65 @@ def rescue_cmdline(env):
     words = [f"root=LABEL={env['RESCUE_ROOT_LABEL']}", "ro", env["BASE_ARGS"],
              env["DRACUT_SAFETY_ARGS"], env["PANIC_ARGS"], "vipboot.root=rescue"]
     return " ".join(w for w in words if w) + "\n"
+
+
+def dt_overlays(dt_dir=None):
+    """This tree's own device-tree overlays, compiled: {name: path to the .dtbo}.
+
+    `devices/vip/dt/*.dts` are facts about the pedal that have to be in the device tree at boot,
+    because the driver reads them once, at probe, long before any systemd unit runs — the pedal's
+    runtime overlays (pedal.project `devices/common/rootfs/etc/pedal/`) cannot reach these. Today
+    that is `rp1-i2c1-recovery.dts`: without it vip has no I2C bus recovery at all (no
+    scl-gpios/sda-gpios on i2c1), so a bus held low costs a reboot
+    (pedal.project bench-results/2026-10-06-codec-i2c-reads-and-the-sda-hold-time.md).
+
+    Compiling here rather than committing a .dtbo keeps one home per fact. It also means dtc has to
+    exist wherever a card is built, which is why `device-tree-compiler` is in the build container's
+    packages.
+    """
+    d = dt_dir or DT_DIR
+    sources = sorted(glob.glob(os.path.join(d, "*.dts")))
+    if not sources:
+        return {}
+    exe = shutil.which("dtc")
+    if not exe:
+        die(f"{d}/*.dts must be compiled and dtc is not installed "
+            f"(device-tree-compiler is in devices/vip/packages and in the build container)")
+    tmp = tempfile.mkdtemp(prefix="vip-dt-")
+    out = {}
+    for src in sources:
+        name = os.path.splitext(os.path.basename(src))[0]
+        dtbo = os.path.join(tmp, name + ".dtbo")
+        r = subprocess.run([exe, "-q", "-@", "-I", "dts", "-O", "dtb", "-o", dtbo, src],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if r.returncode != 0 or not os.path.exists(dtbo):
+            die(f"dtc failed on {src}:\n{r.stdout.decode('utf-8', 'replace')}")
+        out[name] = dtbo
+    return out
+
+
+def install_overlays(dest, overlays):
+    """Put the compiled overlays beside the kernel's in a boot tree (a slot dir, or rescue's root).
+
+    The firmware resolves `dtoverlay=` under `os_prefix`, which is why these go into the slot
+    rather than the partition root — the same place `copy_kernel` puts the kernel's own overlays.
+    """
+    if not overlays:
+        return
+    d = os.path.join(dest, "overlays")
+    os.makedirs(d, exist_ok=True)
+    for name, dtbo in overlays.items():
+        shutil.copyfile(dtbo, os.path.join(d, name + ".dtbo"))
+
+
+def overlay_config(overlays):
+    """The `dtoverlay=` lines for the overlays just installed, or an empty string."""
+    if not overlays:
+        return ""
+    return ("# This tree's own overlays (rtpi devices/vip/dt/), installed beside the kernel's and\n"
+            "# enabled here so the files and the config cannot disagree. They are in the device tree\n"
+            "# at boot rather than applied at runtime because the driver reads them once, at probe.\n"
+            + "".join(f"dtoverlay={name}\n" for name in sorted(overlays)))
 
 
 def copy_kernel(kernel_root, release, dest):
@@ -681,8 +750,10 @@ dtoverlay=uart0
 def cmd_init_pedal_boot(env, args):
     d = args.dir
     os.makedirs(d, exist_ok=True)
+    overlays = dt_overlays(args.dt_dir)
     extra = read(args.config_extra) if args.config_extra else ""
-    write_new(os.path.join(d, "config.txt"), CONFIG_HEAD + ("\n" + extra if extra else ""))
+    write_new(os.path.join(d, "config.txt"),
+              CONFIG_HEAD + overlay_config(overlays) + ("\n" + extra if extra else ""))
     first, *others = env["SLOTS"].split()
     write_new(os.path.join(d, "profile.txt"), profile_text(first, "tuned"))
     write_new(os.path.join(d, "tryboot.txt"), tryboot_text(None))
@@ -692,6 +763,7 @@ def cmd_init_pedal_boot(env, args):
         os.makedirs(board.slot_dir(s), exist_ok=True)
         write_new(os.path.join(board.slot_dir(s), "state"), state_text("empty"))
     fill_slot(board, first, args.release, env["AUDIO_TUNING_ARGS"], kernel_root=args.kernel_root)
+    install_overlays(board.slot_dir(first), overlays)
     board.set_state(first, "good")
     # The spare slot, with a known-good kernel the same validation can promote: the pedal's kernel
     # on vip is a rebuild that is in no archive (pedal.project docs/vip-kernel-image.md), so the
@@ -703,15 +775,20 @@ def cmd_init_pedal_boot(env, args):
             die(f"the fallback release is the pedal's own ({args.release})")
         fill_slot(board, others[0], args.fallback_release, env["AUDIO_TUNING_ARGS"],
                   kernel_root=args.kernel_root)
+        install_overlays(board.slot_dir(others[0]), overlays)
         board.set_state(others[0], "good")
         log(f"slot {others[0]}: {args.fallback_release} (fallback, good); "
             f"slot {first}: {args.release} (active)")
+    for s in [first] + others:
+        log(f"slot {s}: {len(overlays)} of this tree's overlay(s) beside the kernel's")
 
 
 def cmd_init_rescue_boot(env, args):
     d = args.dir
     os.makedirs(d, exist_ok=True)
+    overlays = dt_overlays(args.dt_dir)
     copy_kernel(args.kernel_root, args.release, d)
+    install_overlays(d, overlays)
     extra = read(args.config_extra) if args.config_extra else ""
     write_new(os.path.join(d, "config.txt"),
               "# The rescue root's boot partition. Nothing here changes after the image build.\n"
@@ -721,9 +798,11 @@ def cmd_init_rescue_boot(env, args):
               # rescue itself — its console is ttyAMA10 — but it means the header UART can be
               # watched from rescue, which is where you go when the pedal root is the problem.
               "dtoverlay=uart0\n"
+              + overlay_config(overlays)
               + ("\n" + extra if extra else ""))
     write_new(os.path.join(d, "cmdline.txt"), rescue_cmdline(env))
     write_new(os.path.join(d, "kernel.release"), args.release + "\n")
+    log(f"rescue: {len(overlays)} of this tree's overlay(s) beside the kernel's")
 
 
 # ------------------------------------------------------------------ main
@@ -751,11 +830,13 @@ def main(argv=None):
     s = sub.add_parser("init-pedal-boot")
     s.add_argument("--dir", required=True); s.add_argument("--kernel-root", required=True)
     s.add_argument("--release", required=True); s.add_argument("--config-extra")
+    s.add_argument("--dt-dir", help="this tree's overlays to install (default %s)" % DT_DIR)
     s.add_argument("--fallback-release",
                    help="a second kernel for the spare slot, good and ready to be tried")
     s = sub.add_parser("init-rescue-boot")
     s.add_argument("--dir", required=True); s.add_argument("--kernel-root", required=True)
     s.add_argument("--release", required=True); s.add_argument("--config-extra")
+    s.add_argument("--dt-dir", help="this tree's overlays to install (default %s)" % DT_DIR)
     args = ap.parse_args(argv)
 
     env = read_env(args.env)
