@@ -41,4 +41,4 @@ make test-tib              # latency and xrun suite; results go to results/
 - On piv: no custom kernel flavour names, no `threadirqs` on an RT kernel,
   `RT_GROUP_SCHED` off. `README.md` "Things that will bite you" says why.
 
-System context (the pedal, how the repos fit together, the plan): `~/code.local/pedal.project`, starting at its `CLAUDE.md` and `docs/working-across-repos.md`.
+System context (the pedal, how the repos fit together, the plan): `~/code.local/pedal/pedal.project`, starting at its `CLAUDE.md` and `docs/working-across-repos.md`.
