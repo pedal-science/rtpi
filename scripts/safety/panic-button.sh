@@ -5,11 +5,11 @@
 # This is deliberately blunt and deliberately does NOT need the candidate to be in any
 # particular state.
 #
-# Usage: panic-button.sh <piv|tib> [--reboot]
+# Usage: panic-button.sh piv [--reboot]
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
-DEVICE="${1:?usage: panic-button.sh <piv|tib> [--reboot]}"; shift || true
+DEVICE="${1:?usage: panic-button.sh piv [--reboot]}"; shift || true
 DO_REBOOT=0
 [[ ${1:-} == --reboot ]] && DO_REBOOT=1
 
@@ -40,33 +40,7 @@ case "$DEVICE" in
     ok "piv will boot current/ (known good) on the next reboot"
     ;;
 
-  tib)
-    # Disarm the one-shot. If the env is not yet initialised there is nothing to clear,
-    # and that is fine — an uninitialised env means the flag was never set.
-    if dev_ssh "command -v fw_printenv >/dev/null 2>&1"; then
-      if dev_ssh "sudo fw_printenv $TRY_VAR >/dev/null 2>&1"; then
-        log "clearing $TRY_VAR"
-        dev_ssh "sudo fw_setenv $TRY_VAR 0"
-      else
-        log "$TRY_VAR not set — nothing to clear"
-      fi
-    else
-      warn "fw_printenv not installed; cannot clear $TRY_VAR from Linux"
-    fi
-
-    # Point the live symlinks back at the frozen known-good slot.
-    log "restoring known-good kernel symlinks"
-    dev_ssh "set -e
-      cd $BOOT_DIR
-      for f in zImage uInitrd; do
-        if [ -e \"\$f$GOOD_SLOT_SUFFIX\" ]; then
-          sudo ln -sfn \"\$(basename \"\$f$GOOD_SLOT_SUFFIX\")\" \"\$f\"
-          echo \"  \$f -> \$f$GOOD_SLOT_SUFFIX\"
-        fi
-      done
-      sudo sync" || warn "no frozen -good slot found; leaving symlinks alone"
-    ok "tib will boot the known-good kernel on the next reboot"
-    ;;
+  *) die "unknown device $DEVICE" ;;
 esac
 
 if (( DO_REBOOT )); then

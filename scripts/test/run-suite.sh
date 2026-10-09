@@ -15,15 +15,15 @@
 # loses the ssh connection mid-run, the load generators still die on their own rather than
 # leaving a board pinned at 100% on every core indefinitely.
 #
-# That matters more than usual here because systemd's watchdog is armed (30s on tib, 14s on
-# piv). A board starved hard enough that systemd cannot pet the watchdog will REBOOT. That
+# That matters more than usual here because systemd's watchdog is armed (14s on piv). A
+# board starved hard enough that systemd cannot pet the watchdog will REBOOT. That
 # is by design and it is recoverable, but it will end your run, so use --no-load or a
 # shorter duration if you see unexplained reboots.
 #
 # Usage:
-#   run-suite.sh <piv|tib> [options]
+#   run-suite.sh <piv|vip> [options]
 #     --duration N     seconds per period          (default 300)
-#     --max-freq KHZ   cap CPU frequency, restored afterwards (e.g. 1416000)
+#     --max-freq KHZ   cap CPU frequency, restored afterwards (e.g. 2400000)
 #     --periods "..."  frame counts at 48kHz       (default "64 128 256")
 #     --governor G     set governor for the run, restored afterwards
 #     --no-load        measure idle instead of under load
@@ -31,7 +31,7 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
-DEVICE="${1:?usage: run-suite.sh <piv|tib> [options]}"; shift || true
+DEVICE="${1:?usage: run-suite.sh <piv|vip> [options]}"; shift || true
 load_device "$DEVICE"
 require_ssh
 
@@ -105,11 +105,9 @@ echo "audio_cards=$(tr '\n' '|' < /proc/asound/cards 2>/dev/null | sed 's/  */ /
 # the answer is no, which is a property of the kernel worth recording next to the numbers.
 if chrt -f 50 true 2>/dev/null; then echo "sched_fifo_in_cgroup=true"; else echo "sched_fifo_in_cgroup=false"; fi
 echo "uptime_s=$(cut -d' ' -f1 /proc/uptime)"
-# Thermal state, because on 2026-09-15 this board hit its 90C critical trip mid-suite and
-# the kernel did a HARDWARE PROTECTION shutdown. It idles at 67C with passive throttling
-# trips at 70C and 75C, so a sustained run crosses both early and measures a THROTTLED
-# machine. A latency number recorded without the temperature that produced it is not
-# comparable to one recorded at a different temperature.
+# Thermal state. A board that throttles mid-run measures a different machine at the end of
+# the run than at the start, and a latency number recorded without the temperature that
+# produced it is not comparable to one recorded at a different temperature.
 for z in /sys/class/thermal/thermal_zone*; do
   [ -e "$z" ] || continue
   echo "thermal_$(cat $z/type 2>/dev/null)_start_mC=$(cat $z/temp 2>/dev/null)"
@@ -142,15 +140,14 @@ if [[ -n $GOVERNOR || -n $MAXFREQ ]]; then
   trap restore_tunables EXIT
 fi
 
-# Frequency cap FIRST, so that switching to the performance governor -- which immediately
-# runs at scaling_max_freq -- cannot briefly slam the board to 1.8GHz.
+# ---------------------------------------------------------------- frequency cap
+# Applied FIRST, so that switching to the performance governor -- which immediately runs at
+# scaling_max_freq -- cannot briefly slam the board past the cap.
 #
-# This exists because this board cannot sustain its top bin: on 2026-09-15 a 15-minute
-# suite drove it into the 90C critical trip and the kernel shut the board down mid-run. It
-# idles in the 60s with passive trips at 70C and 75C, so an uncapped run does not measure a
-# 1.8GHz machine -- it measures whatever the thermal governor leaves after throttling, and
-# a different amount of it on every run. A cap the board can actually hold is both
-# survivable AND reproducible, which matters more for comparison than a high number.
+# A cap the board can actually hold is both survivable AND reproducible: an uncapped run
+# does not measure a machine at its top bin, it measures whatever the thermal governor
+# leaves after throttling, and a different amount of it on every run. That is what makes
+# two uncapped runs incomparable.
 if [[ -n $MAXFREQ ]]; then
   log "capping CPU frequency at $(( MAXFREQ / 1000 ))MHz (was $(( ${ORIG_MAXFREQ:-0} / 1000 ))MHz)"
   dev_ssh "echo $MAXFREQ | sudo tee /sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq >/dev/null" \
@@ -240,15 +237,16 @@ fi
 #    latency, so anything landing in overflow is already a failure -- and max still
 #    records its true value regardless.
 #
-# 2. The root-cgroup move. This kernel has CONFIG_RT_GROUP_SCHED=y and runs cgroup v2 with
-#    the cpu controller enabled, which denies SCHED_FIFO to any task outside the root
-#    cgroup -- EVEN AS ROOT. Verified on tib: 'sudo chrt -f 50 true' fails with EPERM in a
-#    session scope and succeeds after moving to /sys/fs/cgroup/cgroup.procs. Without this,
-#    cyclictest exits immediately with "Unable to change scheduling policy!".
+# 2. The root-cgroup move. On a kernel built with CONFIG_RT_GROUP_SCHED=y running cgroup v2
+#    with the cpu controller enabled, SCHED_FIFO is denied to any task outside the root
+#    cgroup -- EVEN AS ROOT: 'sudo chrt -f 50 true' fails with EPERM in a session scope and
+#    succeeds after moving to /sys/fs/cgroup/cgroup.procs. Without this, cyclictest exits
+#    immediately with "Unable to change scheduling policy!".
 #
 #    Note what that implies beyond this script: on such a kernel JACK and every other
 #    SCHED_FIFO audio application is refused too. RT_GROUP_SCHED=n in our own config is
-#    not a nicety.
+#    not a nicety. Ubuntu's raspi-realtime flavour already has it off, so this is a
+#    no-op there and insurance everywhere else.
 #
 #    \$\$ is escaped so the INNER shell expands it to its own pid, not this one.
 sudo bash -c 'echo \$\$ > /sys/fs/cgroup/cgroup.procs 2>/dev/null

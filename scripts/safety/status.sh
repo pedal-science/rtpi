@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Show a device's boot-slot state at a glance. Read-only; safe to run any time.
-# Usage: status.sh <piv|tib>
+# Usage: status.sh piv
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
-DEVICE="${1:?usage: status.sh <piv|tib>}"
+DEVICE="${1:?usage: status.sh piv}"
 load_device "$DEVICE"
 require_ssh
 
@@ -39,25 +39,5 @@ case "$DEVICE" in
     dev_ssh "apt-mark showhold 2>/dev/null | sed 's/^/  /' || true"
     ;;
 
-  tib)
-    echo "--- kernel slots ---"
-    dev_ssh "cd $BOOT_DIR && for f in zImage uInitrd zImage$GOOD_SLOT_SUFFIX uInitrd$GOOD_SLOT_SUFFIX; do
-               printf '  %-14s ' \$f
-               if [ -e \"\$f\" ]; then ls -l \"\$f\" | awk '{print \$NF}'; else echo '(absent)'; fi
-             done"
-    echo
-    echo "--- U-Boot env ---"
-    if dev_ssh "command -v fw_printenv >/dev/null 2>&1"; then
-      dev_ssh "sudo fw_printenv $TRY_VAR 2>&1 | sed 's/^/  /'" || echo "  ($TRY_VAR not set)"
-    else
-      echo "  fw_printenv not installed (package: $UBOOT_ENV_PKG)"
-    fi
-    echo "  env region validity:"
-    dev_ssh "sudo dd if=$UBOOT_ENV_DEV bs=512 skip=$UBOOT_ENV_LBA count=$UBOOT_ENV_BLOCKS status=none" \
-      | python3 "$RTPI_ROOT/scripts/safety/decode-uboot-env.py" /dev/stdin 2>&1 \
-      | sed 's/^/    /' | head -12
-    echo
-    echo "--- watchdog ---"
-    dev_ssh "systemctl show | grep -E 'RuntimeWatchdogUSec|WatchdogDevice'"
-    ;;
+  *) die "unknown device $DEVICE" ;;
 esac

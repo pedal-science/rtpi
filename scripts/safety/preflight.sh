@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Prove the rollback path is intact BEFORE arming anything risky.
 # Read-only. Exits non-zero if it is not safe to proceed.
-# Usage: preflight.sh <piv|tib>
+# Usage: preflight.sh piv
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
-DEVICE="${1:?usage: preflight.sh <piv|tib>}"
+DEVICE="${1:?usage: preflight.sh piv}"
 load_device "$DEVICE"
 require_ssh
 ok "ssh to $SSH_HOST works"
@@ -42,29 +42,7 @@ case "$DEVICE" in
     fi
     ;;
 
-  tib)
-    check "known-good zImage frozen"  "test -e $BOOT_DIR/zImage$GOOD_SLOT_SUFFIX"
-    check "known-good uInitrd frozen" "test -e $BOOT_DIR/uInitrd$GOOD_SLOT_SUFFIX"
-    check "known-good dtb dir frozen" "test -d $BOOT_DIR/dtb$GOOD_SLOT_SUFFIX"
-    check "boot.scr present"          "test -f $BOOT_SCRIPT_BIN"
-    check "fw_printenv installed"     "command -v fw_printenv"
-    check "fw_env.config present"     "test -f /etc/fw_env.config"
-
-    # The single most important tib check: the U-Boot env must be a VALID saved env
-    # before anything calls fw_setenv. If it is still the factory all-zero region,
-    # fw_setenv would write an env containing only our variable and destroy bootcmd.
-    log "checking U-Boot environment validity..."
-    if dev_ssh "sudo dd if=$UBOOT_ENV_DEV bs=512 skip=$UBOOT_ENV_LBA count=$UBOOT_ENV_BLOCKS status=none" \
-         | python3 "$RTPI_ROOT/scripts/safety/decode-uboot-env.py" /dev/stdin >/dev/null 2>&1; then
-      ok "U-Boot env is a valid saved environment"
-    else
-      warn "FAIL: U-Boot env is NOT valid (never saved, or corrupt)."
-      warn "      Install our boot.scr and reboot once: rtpi region 1 runs saveenv from"
-      warn "      inside U-Boot, which writes a complete env. Then re-run this check."
-      warn "      See README 'Bootstrapping tib's U-Boot environment'."
-      fails=$((fails+1))
-    fi
-    ;;
+  *) die "unknown device $DEVICE" ;;
 esac
 
 echo

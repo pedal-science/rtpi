@@ -7,7 +7,7 @@
 # Every row carries the tunables that produced it -- governor, clock cap, HZ, peak
 # temperature -- because a latency figure without them is not comparable to anything.
 #
-# Usage: report.sh [--board tib|piv]
+# Usage: report.sh [--board <name>]      (e.g. --board piv)
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 

@@ -1,6 +1,6 @@
 # What a trimmed vip build keeps loadable even though the board does not load it today.
-# Applied by scripts/build/vip-ubuntu-rt.sh after `make localmodconfig` (the trim), the way
-# tib-rt.sh's keep-list works: each line is a deliberate exception, with a reason.
+# Applied by scripts/build/vip-ubuntu-rt.sh after `make localmodconfig` (the trim): each
+# line is a deliberate exception, with a reason.
 #
 # snd-usb-audio — the bench and soak history was built on USB interfaces (the SSL 2+ on piv),
 # and a future measurement on vip may use one. Without this module such a box would need a

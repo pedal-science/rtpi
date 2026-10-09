@@ -26,7 +26,7 @@
 #
 # WHEN TO IMPLEMENT THIS ANYWAY
 # A custom build earns its keep only for something unobtainable at runtime:
-#   - an out-of-tree patch this board needs (tib needed one; piv so far does not),
+#   - an out-of-tree patch this board needs (piv so far needs none),
 #   - a larger page size for big DSP working sets -- Ubuntu ships CONFIG_ARM64_4K_PAGES
 #     with VA_BITS=48, and 16K/64K pages cut TLB pressure but cannot be set at boot,
 #   - dropping STACKPROTECTOR_STRONG / RANDOMIZE_BASE, which is a security decision and

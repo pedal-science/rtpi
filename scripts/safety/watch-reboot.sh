@@ -7,7 +7,7 @@
 # away -> comes back -> goes away -> comes back. A naive "wait for it to return" would
 # declare success after the first bounce, before the candidate kernel has even run.
 #
-# Usage: watch-reboot.sh <piv|tib> [--expect <kernel-release>] [--timeout <sec>]
+# Usage: watch-reboot.sh <piv|vip> [--expect <kernel-release>] [--timeout <sec>]
 #
 # Exit 0 = came back running the expected kernel (or any kernel, if --expect omitted)
 # Exit 1 = came back on a DIFFERENT kernel (i.e. it fell back — the candidate failed)
@@ -15,7 +15,7 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
-DEVICE="${1:?usage: watch-reboot.sh <piv|tib> [--expect REL] [--timeout SEC]}"; shift
+DEVICE="${1:?usage: watch-reboot.sh <piv|vip> [--expect REL] [--timeout SEC]}"; shift
 EXPECT=""
 TIMEOUT=600
 SETTLE=90          # how long the device must stay up before we believe it is settled
@@ -95,14 +95,14 @@ while (( $(elapsed) < TIMEOUT )); do
       elif [[ $kernel == "$EXPECT" ]]; then
         # Deliberately says only what is known. The kernel matching --expect does NOT by
         # itself mean the candidate booted: while a freshly frozen fallback holds the same
-        # kernel version as the candidate, both slots report identical uname output. On tib
-        # the slot is readable from /proc/cmdline, so report that instead of inferring.
+        # kernel version as the candidate, both slots report identical uname output.
         ok "kernel matches --expect"
-        # piv/tib mark the slot rtpi.slot=…; vip marks it vipboot.slot=… (rtpi's vip-boot).
+        # vip marks the booted slot on the kernel cmdline (vipboot.slot=…, rtpi's vip-boot).
+        # piv's piboot-try marks nothing, so there the version is all we have.
         SLOT=$(ssh "${SSH_OPTS[@]}" -o ConnectTimeout=6 "${LAST_PATH:-$SSH_HOST}" \
-               "grep -oE '(rtpi|vipboot)\.slot=[a-z-]*' /proc/cmdline 2>/dev/null" || true)
+               "grep -oE 'vipboot\.slot=[a-z-]*' /proc/cmdline 2>/dev/null" || true)
         if [[ -n $SLOT ]]; then
-          ok "booted slot: ${SLOT#*.slot=}"
+          ok "booted slot: ${SLOT#vipboot.slot=}"
         else
           warn "no slot marker on the kernel cmdline — cannot tell which slot booted"
         fi

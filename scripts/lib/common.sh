@@ -34,11 +34,11 @@ load_device() {
 }
 
 # --- Reaching the device on more than one path -------------------------------------
-# A board with two working interfaces is only safer if the TOOLING can use both. tib's
-# hostname resolves to its wlan0 address, so a stock `ssh tib` reaches the board over wifi
-# only -- and the whole reason we tolerate the dwmac-rk rewrite risk is that wlan0 is an
-# independent path if ethernet breaks. That argument fails unless we can also reach the
-# board when the reverse happens, so scripts try every known address.
+# A board with two working interfaces is only safer if the TOOLING can use both. A device's
+# hostname resolves to one interface's address, so a stock `ssh <host>` reaches the board
+# over that path only -- and the whole reason we tolerate an interface rewrite risk is that
+# the other path is independent if the first breaks. That argument fails unless we can also
+# reach the board when the reverse happens, so scripts try every known address.
 
 # ssh_hosts — ordered list of addresses for the loaded device, primary first.
 ssh_hosts() {
