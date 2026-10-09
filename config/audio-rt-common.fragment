@@ -1,4 +1,4 @@
-# Low-latency audio deltas common to both boards.
+# Low-latency audio deltas common to every board rtpi builds for.
 # Applied with scripts/kconfig/merge_config.sh on top of the base config.
 #
 # Rationale per symbol — the point is worst-case latency, not throughput. One late
@@ -32,8 +32,8 @@ CONFIG_HIGH_RES_TIMERS=y
 # CONFIG_DEBUG_ATOMIC_SLEEP is not set
 
 # --- Debug info: do not generate it at all -----------------------------------------
-# Armbian builds DWARF5. INSTALL_MOD_STRIP=1 threw it away at install time, but only after
-# paying to compile it: the module tree came out at 1.1GB, mac80211.ko at 29.3MB against
+# INSTALL_MOD_STRIP=1 throws debug info away at install time, but only after paying to
+# compile it: a module tree with DWARF runs to about 1.1GB, mac80211.ko at 29.3MB against
 # 1.6MB stripped. Turning generation off instead of the output also shrinks the build tree
 # and the build time, and it is strictly better than stripping because there is no window
 # in which a 1.1GB tree exists to be shipped by accident.
@@ -60,17 +60,15 @@ CONFIG_HWLAT_TRACER=y
 CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE=y
 
 # --- Sound -------------------------------------------------------------------------
-# Both boards use class-compliant USB audio. Built in rather than modular so it is
-# available early and cannot be delayed by module loading.
+# Class-compliant USB audio. Built in rather than modular so it is available early and
+# cannot be delayed by module loading.
 #
 # CONFIG_SOUND=y IS NOT OPTIONAL WHEN ASKING FOR CONFIG_SND=y. sound/Kconfig nests
 # "menuconfig SND" inside "if SOUND", so SND can never be less modular than SOUND. With
-# SOUND=m (Armbian's value, and this project's base config) olddefconfig silently
-# downgrades every =y request in this section to m: merge_config.sh reports the symbol as
-# applied, olddefconfig exits 0, and the only symptom is a kernel that does not match its
-# own fragment. Measured on the 2026-09-15 tib build, which shipped CONFIG_SND_USB_AUDIO=m
-# from a fragment that had asked for =y since the first commit. tib-rt.sh now asserts the
-# built value instead of trusting the merge.
+# SOUND=m (this project's base config) olddefconfig silently downgrades every =y request in
+# this section to m: merge_config.sh reports the symbol as applied, olddefconfig exits 0,
+# and the only symptom is a kernel that does not match its own fragment. So the build
+# scripts assert the built value instead of trusting the merge.
 CONFIG_SOUND=y
 CONFIG_SND=y
 CONFIG_SND_USB_AUDIO=y
@@ -81,5 +79,6 @@ CONFIG_SND_DUMMY=m
 
 # --- Watchdog observability --------------------------------------------------------
 # Without this, /sys/class/watchdog/watchdog0/{state,timeout,bootstatus} do not exist and
-# we cannot verify the watchdog is actually armed. It is off in Armbian's config.
+# we cannot verify the watchdog is actually armed. The whole rollback story depends on it
+# being armed, so the sysfs interface is not optional here.
 CONFIG_WATCHDOG_SYSFS=y

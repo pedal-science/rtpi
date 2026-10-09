@@ -1,6 +1,6 @@
 # Build container
 
-One arm64 image builds both kernels: native arm64 for piv, cross armhf for tib.
+One arm64 image builds both kernels: native arm64 for piv and for vip.
 
 ## colima sizing
 

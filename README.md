@@ -6,9 +6,9 @@ rollback so a bad kernel can never cost remote access.
 | host | board | arch | OS | stock kernel |
 |---|---|---|---|---|
 | `piv` | Raspberry Pi 500 (BCM2712) | arm64 | Ubuntu 26.04 resolute | `7.0.0-1017-raspi` |
-| `tib` | ASUS Tinker Board S (RK3288) | armhf (ARMv7) | Armbian 26.8.3 | `6.18.44-current-rockchip` |
+| `vip` | Raspberry Pi 5 (BCM2712) | arm64 | Ubuntu 26.04 resolute | `7.0.0-1017-raspi-realtime` |
 
-Audio hardware: an SSL 2+ Mk II on piv, a Realtek USB interface on tib.
+Audio hardware: an SSL 2+ Mk II on piv; vip's audio is the pedal's own WM8960 codec.
 
 ---
 
@@ -54,18 +54,6 @@ The cycle:
 no `tryboot.txt` is needed; the `[tryboot]` section **is** the supported mechanism, and
 `tryboot_a_b=1` is required for it.
 
-### tib — a self-clearing one-shot in the U-Boot environment
-
-RK3288 has no tryboot, so `devices/tib/boot/boot.cmd` builds the equivalent: if the
-U-Boot variable `rt_try` is `1`, it clears the flag, **persists and verifies the clear**,
-and only then boots the candidate. Any failure in that sequence boots the frozen
-known-good slot instead, so a failed clear fails *safe* rather than into a boot loop.
-
-Note the inversion: the **candidate** is the normal Armbian `zImage`/`uInitrd`/`dtb`
-symlinks (which Armbian's postinst keeps pointing at the newest kernel), and the
-**known-good** is a frozen copy we make (`*-good`). So a routine Armbian kernel upgrade
-can never silently become the default boot.
-
 ### vip — two slots, and a pedal kernel that is not a package
 
 vip is built from an image, not upgraded with apt (pedal.project, `docs/vip-image.md`), so
@@ -94,67 +82,29 @@ kernel with the same release string is a different kernel — the release string
 that separates two module sets, which is why trials get their own suffix
 (`--localversion -numaemu2-trimmed`) and go through `vip-try` before anything pins them.
 
-## tib bring-up from a fresh Armbian install
-
-Every step below is a script in this repo. Run them in this order; each one refuses to
-proceed if the previous one has not been done.
-
-```bash
-make colima-up && make image          # build environment (6 CPU / 8G on a 16G Mac)
-
-make tib-freeze-good                  # 1. freeze the running stock kernel as the fallback
-make tib-bootscr                      # 2. install the one-shot boot script
-ssh tib 'sudo systemctl reboot'       #    reboot once: rtpi region 1 bootstraps the U-Boot env
-make status-tib                       #    must report VALID before any fw_setenv
-ssh tib 'sudo apt-get install -y libubootenv-tool'
-make tib-validate-service             # 3. install the candidate-boot validate service
-
-make tib-rt                           # 4. build mainline 7.2.6 + patches/tib + RT fragments
-make tib-install-rt                   #    stage it into the candidate slot
-make tib-try                          # 5. arm the one-shot, reboot, watch the result
-```
-
-If it comes back on the candidate and you are happy with it, make it permanent:
-
-```bash
-make tib-freeze-good                  # promote: the candidate becomes the new known-good
-```
-
-Promotion is deliberate and separate on purpose. A candidate that passes validation is
-still a one-shot — the next reboot returns to the frozen slot — so nothing becomes the
-default until you say so.
-
-### What each piece contributes, and what breaks without it
-
-| step | without it |
-|---|---|
-| freeze-good | nothing to fall back to; a bad kernel is permanent |
-| bootscr | the `-good` files are inert; Armbian's postinst decides what boots |
-| env bootstrap | `fw_setenv` writes a one-variable environment and kills `bootcmd` |
-| validate service | a candidate that boots without network sits there unreachable |
-| `patches/tib/` | SDIO wifi never enumerates on 7.2.6 — the board has no network |
-| RT fragments | no `PREEMPT_RT`; and with `RT_GROUP_SCHED` left on, no `SCHED_FIFO` at all |
-
 ### Testing
 
 ```bash
-make test-tib                         # or, to match the recorded results exactly:
-./scripts/test/run-suite.sh tib --duration 300 --periods "64 128 256" \
-    --governor performance --max-freq 1416000 --label "..."
-./scripts/test/report.sh --board tib
+make test-piv                         # or, for one run shaped to match the recorded results:
+./scripts/test/run-suite.sh piv --duration 300 --periods "64 128 256" \
+    --governor performance --label "..."
+./scripts/test/report.sh --board piv
 ```
 
-**Always cap the clock for sustained runs.** This board cannot hold 1.8GHz: an uncapped
-15-minute suite drove it into the 90C critical trip and the kernel shut it down mid-run.
-1416MHz holds at 72-76C and, more importantly, is reproducible — uncapped, thermal
-throttling means every run measures a different machine.
+`run-suite.sh` takes any device that has a `devices/<host>/device.env` and `cyclictest` installed;
+these are the recordings that exist for piv.
+
+**For a sustained run, cap the clock at a frequency the board can actually hold.** An
+uncapped run does not measure a machine at its top bin; it measures whatever the thermal
+governor leaves after throttling, and a different amount of it on every run — so two
+uncapped runs are not comparable. `--max-freq` sets the cap for the run and restores the
+old value afterwards, which is what makes the figure reproducible rather than merely
+survivable.
 
 ### What is NOT captured in this repo
 
-- The Armbian install itself. Start from a working Armbian image on a card the board boots
-  from, with networking configured. See the card-compatibility note in RECOVERY.
-- `/etc/fw_env.config`, written by `tib-install-bootscr.sh`'s follow-up step above.
-- Anything about `piv`, which uses an entirely different mechanism (`tryboot`).
+- The OS install itself. Start from a working image on a card the board boots from, with
+  networking configured; RECOVERY says what to do when it does not come back.
 
 ## piv low-latency audio tuning
 
@@ -209,9 +159,9 @@ ranks a tuning change on p99.9 and prints max alongside, rather than ranking on 
 
 A 300s run of the promoted config (900k/450k/225k samples) gives p99 22/27/31us, p99.9
 42/50/58us, max 126/182/139us — worst case 6.8% of its period budget — holding 2400MHz
-for the full 15 minutes with a 48.5C peak and no throttling at any point. piv has
-thermal headroom that tib does not: trips are at 50/60/67.5/75C with critical at 110C,
-and it idles at 38C.
+for the full 15 minutes with a 48.5C peak and no throttling at any point. piv has plenty
+of thermal headroom to spare: trips are at 50/60/67.5/75C with critical at 110C, and it
+idles at 38C.
 
 **Not yet measured: a 300s *untuned* baseline.** The comparison table above is 60s on both
 sides, which is a fair comparison but under-samples maxima. To get the 300s pair, stage a
@@ -266,7 +216,7 @@ build is already set the way you would set it, and the remaining levers are not 
 | lever | state on `7.0.0-1017-raspi-realtime` |
 |---|---|
 | `PREEMPT_RT`, `PREEMPT_LAZY`, `HZ=1000`, `RCU_BOOST`, `HIGH_RES_TIMERS` | already on |
-| `RT_GROUP_SCHED` | already off (unlike Armbian on tib) |
+| `RT_GROUP_SCHED` | already off |
 | `DEBUG_PREEMPT`, `PROVE_LOCKING`, `SCHED_DEBUG`, `SLUB_DEBUG_ON`, `KASAN` | already off |
 | `NO_HZ_FULL`, `RCU_NOCB_CPU` | already on — activated by *command line*, not a rebuild |
 | `TRANSPARENT_HUGEPAGE`, `NUMA_BALANCING` | not built at all; nothing to disable |
@@ -367,9 +317,9 @@ no-op that will mislead you.
 
 ### `RT_GROUP_SCHED=y` blocks SCHED_FIFO entirely on cgroup v2
 
-Armbian's stock tib kernel ships `CONFIG_RT_GROUP_SCHED=y`, and the system runs cgroup v2
-with the `cpu` controller enabled. That combination denies `SCHED_FIFO` to every task
-outside the root cgroup — **including root**:
+A kernel built with `CONFIG_RT_GROUP_SCHED=y`, on a system running cgroup v2 with the `cpu`
+controller enabled, denies `SCHED_FIFO` to every task outside the root cgroup — **including
+root**:
 
 ```bash
 $ sudo chrt -f 50 true
@@ -379,14 +329,16 @@ $ sudo bash -c 'echo $$ > /sys/fs/cgroup/cgroup.procs; chrt -f 50 true'   # work
 ```
 
 This is not a benchmarking curiosity. Every systemd service and login session lives in a
-non-root cgroup, so on this kernel **JACK and every other realtime audio application is
+non-root cgroup, so on such a kernel **JACK and every other realtime audio application is
 refused a realtime priority**. `cyclictest` fails the same way, with the unhelpful message
 `Unable to change scheduling policy!` even under `sudo`.
 
 `scripts/test/run-suite.sh` works around it by moving the measurement process into the root
 cgroup first. That is fine for a benchmark and wrong for production — the real fix is
-`CONFIG_RT_GROUP_SCHED=n`, which our config fragment already specifies. Treat this as an
-independent reason to build a custom kernel for tib, separate from PREEMPT_RT.
+`CONFIG_RT_GROUP_SCHED=n`, which `config/audio-rt-common.fragment` specifies. It is an
+independent reason to care about the kernel config, separate from `PREEMPT_RT`: Ubuntu's
+`raspi-realtime` flavour already has it off, so the workaround is insurance for any other
+kernel these scripts are pointed at.
 
 Check it on any kernel with:
 
@@ -403,87 +355,22 @@ was never merged. Use the version banner:
 uname -v | grep -q PREEMPT_RT
 ```
 
-## Bootstrapping tib's U-Boot environment
-
-**Do this before any `fw_setenv`, or you will stop the board booting.**
-
-The env region (`/dev/mmcblk0` at `0x3F8000`, 32 KB, ending exactly at partition 1) is
-currently **all zeros with a zero CRC** — U-Boot has never saved an environment and runs
-on its compiled-in defaults. `libubootenv`'s `fw_setenv` has no built-in defaults (it
-reads `/etc/u-boot-initial-env`, which does not exist), so a *first* `fw_setenv` writes a
-valid-CRC environment containing **only** your variable, destroying `bootcmd`.
-
-**This needs no serial console.** `saveenv` *from inside U-Boot* has no such problem — it
-serialises the complete in-memory environment, which at that point is the full compiled-in
-default set. So rtpi region 1 of our [boot.cmd](devices/tib/boot/boot.cmd) does the
-bootstrap itself, on the first boot that finds `rt_try` undefined:
-
-```
-if test "${rt_try}" = ""; then
-	setenv rt_try 0
-	if saveenv; then ...
-fi
-```
-
-It is placed *before* the `armbianEnv.txt` import, so what gets persisted is U-Boot's own
-defaults plus `rt_try` — not a copy of `armbianEnv.txt`, which is re-imported from the
-filesystem every boot anyway.
-
-Verified against this board's own U-Boot config (`/usr/lib/u-boot/tinker-s-rk3288_defconfig`):
-
-| symbol | value | meaning |
-|---|---|---|
-| `CONFIG_ENV_IS_IN_MMC` | `y` | env lives in MMC |
-| `CONFIG_ENV_MMC_DEVICE_INDEX` | **`1`** | U-Boot mmc1 = **the SD card**, not eMMC |
-| `CONFIG_ENV_OFFSET` | `0x3f8000` | matches `UBOOT_ENV_OFFSET` |
-| `CONFIG_ENV_SIZE` | `0x8000` | matches `UBOOT_ENV_SIZE` |
-| `CONFIG_CMD_SAVEENV` | `y` | `saveenv` is compiled in |
-
-So the order is: **install `boot.scr` → reboot once → verify → only then `fw_setenv`.**
-
-```bash
-make status-tib                    # decodes and CRC-checks the region — must say VALID
-sudo fw_printenv | head            # should list ~27 variables including bootcmd
-```
-
-`scripts/safety/preflight.sh tib` refuses to proceed until this reports VALID. If the
-bootstrap `saveenv` failed for any reason the region simply stays unwritten, U-Boot keeps
-using its defaults, and the board still boots — so this fails safe.
-
 ## Out-of-band console
 
-**Serial is optional on tib.** Its U-Boot is built with `CONFIG_VIDEO=y`,
-`CONFIG_VIDEO_DW_HDMI=y`, `CONFIG_USB_KEYBOARD=y` and `CONFIG_CONSOLE_MUX=y`, and its
-built-in environment is:
-
-```
-stdout=serial,vidconsole
-stderr=serial,vidconsole
-stdin=serial,usbkbd
-```
-
-So **a monitor plus a USB keyboard gives a fully interactive U-Boot prompt**, including
-"Hit any key to stop autoboot". The kernel cmdline already carries
-`console=ttyS2,115200n8 console=tty1`, so kernel messages reach the screen too.
-
-What HDMI does *not* give you, and serial does:
+Serial is optional on both boards. What it buys you is the one thing nothing else does:
+the ability to **read a failed boot remotely, from the Mac, without walking over to the
+board**. A permanently-attached FTDI cable is the only way to do that.
 
 | | serial | HDMI + USB keyboard |
 |---|---|---|
-| interactive U-Boot rescue | yes | **yes** |
+| interactive rescue (U-Boot prompt, or a dracut shell) | yes | yes |
 | see the kernel boot failure | yes | yes |
-| earliest SPL output, before video init | yes | **no** |
+| earliest firmware output, before video init | yes | **no** |
 | capture/scroll the log into a file | yes | photograph the screen |
-| read a failure **remotely, unattended** | yes | no — you walk over and look |
+| read a failure **remotely, unattended** | yes | no |
 
-A permanently-attached FTDI cable is the only way to read a failed boot from the Mac
-without being at the board. That is its remaining value; nothing in this repo *requires*
-it.
-
-Also compiled in: `CONFIG_PSTORE_RAM=y` and `CONFIG_PSTORE_CONSOLE=y`, so a reserved
-ramoops region would let the kernel log survive the watchdog reset and be read from
-`/sys/fs/pstore` on the fallback boot — kernel-stage diagnosis with no cable at all. Not
-set up yet.
+A kernel log that survives the watchdog reset would cover the same ground with no cable at
+all (`pstore`/`ramoops`, read from `/sys/fs/pstore` on the fallback boot). Not set up yet.
 
 ### Pinouts, if you do use serial
 
@@ -491,13 +378,14 @@ One **FTDI TTL-232R-3V3** cable per board. (The Raspberry Pi Debug Probe adds no
 
 | board | TX | RX | GND | settings |
 |---|---|---|---|---|
-| `tib` (ttyS2) | pin **32** | pin **33** | pin **34** | 115200 8N1 |
 | `piv` (ttyAMA0) | pin **8** | pin **10** | pin **6** | 115200 8N1 |
+| `vip` (ttyAMA10, 3-pin header) | — | — | — | 115200 8N1 |
 
-tib's console is **not** on pins 8/10 — those are UART1. On piv, `BOOT_UART=1` outputs to
-a JST header the Pi 500's case does not expose, so it buys nothing externally; add
-`enable_rp1_uart=1` and `uart_2ndstage=1` to `config.txt` to get earlier output onto the
-40-pin header.
+On vip the console is on the board's own 3-pin UART header, where the Debug Probe plugs in,
+and every pedal command line carries `console=ttyAMA10,115200` (see
+`devices/vip/device.env`). On piv, `BOOT_UART=1` outputs to a JST header the Pi 500's case
+does not expose, so it buys nothing externally; add `enable_rp1_uart=1` and
+`uart_2ndstage=1` to `config.txt` to get earlier output onto the 40-pin header.
 
 From the Mac:
 
@@ -534,55 +422,43 @@ Work down this list. Each step assumes the one before it failed.
    ```
    Or minimally: delete the `new/` directory and make sure `current/state` says `good`.
 
-### tib will not come back
+### vip will not come back
 
-**There is no eMMC on this board.** `mmc@ff0f0000` (the eMMC controller) is enabled but
-reports no card, and `mmc@ff0e0000` is disabled — `lsblk` shows only `mmcblk0`, the SD.
-The Rockchip idbloader is at sector 64 of `/dev/mmcblk0` and the env region at LBA 8128,
-both *before* partition 1 at sector 8192. So **writing a fresh image to the SD card
-replaces the bootloader, its environment and the root filesystem in one go**, with nothing
-surviving elsewhere to override it. Step 4 below is a genuine total reset.
+vip has a **rescue root of its own** on the card, separate from the pedal root, and its
+`vip-boot` decides independently which boot partition, kernel slot and profile come up. So the
+recovery ladder starts with the mechanism rather than with a card writer.
 
-1. **Power-cycle once.** The one-shot flag is cleared before the candidate boots, so a
-   cold boot uses the frozen known-good slot.
-2. **Attach a monitor and a USB keyboard.** U-Boot's console is muxed to HDMI and it
-   accepts a USB keyboard, so you get the prompt without any cable. Interrupt U-Boot
-   (`BOOTDELAY=1`, so be quick) and boot known-good by hand:
-   ```
-   => setenv rt_try 0
-   => saveenv
-   => boot
-   ```
-   (Serial, on pins 32/33/34 at 115200, gets you the same prompt — plus the earliest
-   output, which HDMI misses because video init happens later.)
-3. **If the U-Boot environment is corrupt**, U-Boot falls back to its compiled-in defaults,
-   which still boot. To reset it explicitly:
-   ```
-   => env default -a
-   => saveenv
-   ```
-4. **Restore the env region from backup** on another machine, with the SD card inserted:
+1. **Wait ~5 minutes.** A pedal boot that never reaches `pedal-guard` writes the reason to
+   `bootsel` and reboots into rescue by itself — three boots in a row that never got that far
+   and rescue becomes sticky. `scripts/safety/watch-reboot.sh vip` will tell you what came
+   back.
+2. **Power-cycle it once.** A candidate is one-shot, so a cold boot loads the active slot —
+   the one that was good before. This resolves most cases.
+3. **Serial console** (the 3-pin UART header, 115200; every pedal command line carries
+   `console=ttyAMA10,115200`). In rescue:
    ```bash
-   sudo dd if=devices/tib/backups/latest/uboot-env.bin of=/dev/diskN bs=512 seek=8128 count=64
+   vip-boot status              # which slot/profile/root, and why rescue was entered
+   vip-boot default pedal       # stop being sticky: boot the pedal root again
+   vip-reimage pedal            # restore the pedal root from pedal-data/images/
    ```
-   Check `decode-uboot-env.py` reports VALID on the backup first.
-5. **Write a fresh image to the spare SD card.** This is the floor: it always works, and
-   because everything lives on the card it is a complete reset. The cost is that you lose
-   the board's state and learn nothing about *why* it failed — which is what the scripts
-   in this repo exist to make cheap to rebuild. Afterwards, re-run the tib setup from this
-   repo (Phase 5: freeze the known-good slot, install `boot.scr`, reboot to bootstrap the
-   env, then `make tib-rt`).
+4. **From this Mac**, if ssh works at all: `make vip-try` puts a candidate in the spare slot,
+   and anything other than a clean validation returns to the active slot and marks the candidate
+   bad.
+5. **The spare card is the floor.** The card's layout, the rescue root's contents and how an
+   image is written are pedal.project's `docs/vip-image.md`. The one act with no card-level
+   fallback at all is a bootloader EEPROM write.
 
 ### What none of this covers
 
-- A hang *before* the watchdog driver loads (roughly the first 5–15 seconds). No software
-  can catch that; it needs a physical power cycle. A network-controlled smart plug is the
-  only remote fix, and is the single best hardware addition if you ever want to run these
-  tests unattended.
+- A hang *before* the watchdog driver loads (roughly the first 5–15 seconds), and a default
+  kernel that hangs before its initramfs runs — the boot counter never moves, so it resets into
+  the same thing. No software can catch either; they need a physical power cycle. A
+  network-controlled smart plug is the only remote fix, and is the single best hardware
+  addition if you ever want to run these tests unattended.
 - Firmware/bootloader blob updates on piv. `pi-try` copies those to the boot partition
   root as well as into the slot, and the source notes that part *"is not subject to
   tryboot"* — so firmware updates are **not** protected by the A/B mechanism.
-- A corrupt boot partition or EEPROM.
+- A corrupt boot partition, a corrupt EEPROM, or a dead card.
 
 ---
 
@@ -591,10 +467,8 @@ surviving elsewhere to override it. Step 4 below is a genuine total reset.
 ```
 devices/<host>/device.env    single source of truth for each board's facts
 devices/<host>/etc/          files deployed to the device (validate hook, drop-ins)
-devices/<host>/boot/         boot scripts (tib's custom boot.cmd)
 devices/<host>/backups/      pulled backups — off-device, which is the point
 config/*.fragment            kernel config deltas, with rationale per symbol
-patches/                     empty for tib by design; 7.2.6 already has the RT fixes
 scripts/lib/common.sh        shared helpers and the safety guards
 scripts/safety/              backup, preflight, arm, watch, rehearse, panic-button
 scripts/deploy/              things that change a device
@@ -624,22 +498,3 @@ build asserts the delta is exactly `CONFIG_NUMA_EMU` and `CONFIG_LOCALVERSION`, 
 the board loads is present or built in (minus `trimmed-ok.txt`), that the modules are stripped,
 and that `make kernelrelease` is the string it meant to build.
 
-**tib** — ARM32 PREEMPT_RT became available in mainline **v7.1** (commit `c6e61c06d606`,
-*"ARM: 9463/1: Allow to enable RT"*). Three follow-up fixes missed 7.2 but landed in
-stable **v7.2.6**; verified by bisecting stable tags —
-`HAVE_POSIX_CPU_TIMERS_TASK_WORK` is absent in v7.2…v7.2.5 and present in v7.2.6.
-
-One board patch **is** required, in `patches/tib/`: mainline's `rk3288-tinker.dtsi` gives
-the wifi `mmc-pwrseq-simple` node no `post-power-on-delay-ms`, which defaults to 0. The
-8723ds is then probed before its power rail has settled and SDIO enumerates nothing, so
-the board boots with no network at all. A 20ms delay fixes it. `scripts/build/tib-rt.sh`
-applies everything in `patches/tib/` and then asserts the property is present in the
-BUILT dtb — checking the source is not enough, because a patch applied to a `.dtsi` the
-board's `.dtb` does not include would pass every other check and still ship a kernel with
-no network.
-
-The real regression risk moving tib from 6.18 to 7.2 is not the device tree
-(`rk3288-tinker-s.dts` is byte-identical between v6.18.52 and v7.2.6) but
-`drivers/net/ethernet/stmicro/stmmac/dwmac-rk.c`, rewritten wholesale across 7.1/7.2.
-That is the one code path that can cost ssh, which is why validation checks the network
-first and accepts wlan0 as an independent fallback path.

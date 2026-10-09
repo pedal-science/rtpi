@@ -1,14 +1,5 @@
-
-# Backups pulled from devices. The boot tarballs are hundreds of MB, so those stay
 # Build artefacts — large, reproducible from sources. Never commit.
 # Kernel trees live in a Docker volume, never here.
-# Local scratch
-# Raw per-run test output. The assembled results/*.json are committed; the raw
-# Whole-card images pulled to the Mac. Multi-GB; regenerable from the board.
-# cyclictest JSON + histograms behind them are bulky and regenerable.
-# is the difference between restoring tib and re-imaging it.
-# local — but the small text artefacts and the U-Boot env image are committed, because
-# they are exactly what you want in front of you during a recovery, and a 32KB env image
 *.buildinfo
 *.changes
 *.ddeb
@@ -20,16 +11,23 @@
 *.tar.xz
 .DS_Store
 /build/
+linux-*/
+linux/
+scratch/
+sources/
+work/
+
+# Backups pulled from devices. The boot tarballs and whole-card images are hundreds of MB
+# or more, so those stay local; the small text artefacts are committed, because they are
+# exactly what you want in front of you during a recovery.
 devices/*/backups/**/*.img
 devices/*/backups/**/*.img.zst
 devices/*/backups/**/*.tar
 devices/*/backups/**/*.tar.gz
-linux-*/
-linux/
+
+# Raw per-run test output. The assembled results/*.json are committed; the cyclictest JSON
+# and histograms behind them are bulky and regenerable.
 results/raw/
-scratch/
-sources/
-work/
 
 # Python bytecode from the test suite (tests/vip-boot/ and its loader).
 __pycache__/

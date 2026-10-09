@@ -1,10 +1,10 @@
 # Build environment for both targets.
 #
 #   piv  — arm64 kernel, built NATIVELY (the container is arm64 on Apple Silicon)
-#   tib  — armhf kernel, CROSS-built with gcc-arm-linux-gnueabihf
+#   vip  — arm64 kernel, same source and flavour as piv, rebuilt with the NUMA fragment
 #
-# gcc-arm-linux-gnueabihf is published for arm64 on Ubuntu resolute, so one arm64 image
-# covers both. Pin by digest in docker/image.lock for reproducibility.
+# Both are arm64, so one arm64 image covers them. Pin by digest in docker/image.lock for
+# reproducibility.
 FROM ubuntu:26.04
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -23,7 +23,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       kernel-wedge makedumpfile \
       u-boot-tools \
       ccache \
-      gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf \
     && rm -rf /var/lib/apt/lists/*
 
 # Ubuntu kernel packaging pulls a few extras when building the raspi flavour.
