@@ -383,6 +383,60 @@ class TestCandidates(FakeVip):
         self.assertEqual(self.profile(), ("b", "tuned"))
 
 
+    def test_set_args_moves_every_slot_and_keeps_what_it_replaced(self):
+        """The tuning arguments live in the slots, so a board already up changes them by rewriting
+        those files -- and a slot left on the old line is a fallback into a layout the pedal's rules
+        no longer describe. One pass has to move both, keep what it replaced, refuse to write
+        without being asked, and be able to put the old line back (the rescue-root path)."""
+        slot = {s: f"{self.boot}/{s}/cmdline-tuned.txt" for s in ("a", "b")}
+        # Both slots have to exist to be rewritten, and on a fresh card only the active one does:
+        # stage the spare the way a board does before looking at either.
+        self.run_vb("try-kernel", NEW, "--no-reboot")
+        # A tree built before the change: what vip booted from 2026-09-29 to 2026-10-09.
+        for path in slot.values():
+            old = self.read(path).replace("isolcpus=managed_irq,domain,1-3",
+                                          "isolcpus=managed_irq,domain,2-3").replace(
+                                              "irqaffinity=0 ", "irqaffinity=0-1 ")
+            with open(path, "w") as f:
+                f.write(old)
+        r = self.run_vb("set-args", check=False)
+        self.assertNotEqual(r.returncode, 0, "it wrote without --yes")
+        self.assertIn("+isolcpus=managed_irq,domain,1-3", r.stderr)
+        self.assertIn("isolcpus=managed_irq,domain,2-3", self.read(slot["a"]))
+
+        self.run_vb("set-args", "--yes")
+        for s, path in slot.items():
+            tuned = self.read(path)
+            self.assertIn("isolcpus=managed_irq,domain,1-3", tuned)
+            self.assertIn("nohz_full=1-3", tuned)
+            self.assertIn("rcu_nocbs=1-3", tuned)
+            self.assertIn("irqaffinity=0 ", tuned)
+            self.assertNotIn("irqaffinity=0-1", tuned)
+            self.assertIn(f"vipboot.slot={s}", tuned)   # the rest of the line is untouched
+            self.assertIn("root=LABEL=", tuned)
+            self.assertIn("domain,1-3", self.read(f"{self.boot}/{s}/tuned.args"))
+        kept = [f for f in os.listdir(f"{self.boot}/a") if f.startswith("cmdline-tuned.txt.bak-")]
+        self.assertEqual(len(kept), 1)
+        self.assertIn("isolcpus=managed_irq,domain,2-3", self.read(f"{self.boot}/a/{kept[0]}"))
+
+        # Nothing to do the second time, and no second backup.
+        self.assertIn("already says", self.run_vb("set-args", "--yes").stderr)
+        self.assertEqual(len([f for f in os.listdir(f"{self.boot}/a") if f.startswith("cmdline-tuned.txt.bak-")]), 1)
+
+        self.run_vb("set-args", "--restore")
+        self.assertIn("isolcpus=managed_irq,domain,2-3", self.read(slot["a"]))
+
+    def test_set_args_refuses_a_tree_it_does_not_recognise(self):
+        """Better a refusal than a boot line written from a misunderstanding: an empty or missing
+        cmdline-tuned.txt means this is not a pedal boot tree."""
+        with open(f"{self.boot}/b/cmdline-tuned.txt", "w"):
+            pass
+        r = self.run_vb("set-args", "--yes", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("is not a pedal boot tree", r.stderr)
+        self.assertIn("isolcpus=managed_irq,domain,1-3", self.read(f"{self.boot}/a/cmdline-tuned.txt"))
+
+
 class TestProfilesAndRoots(FakeVip):
     def test_loose_once(self):
         self.run_vb("loose")

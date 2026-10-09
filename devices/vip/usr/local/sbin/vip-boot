@@ -4,6 +4,7 @@
     vip-boot status
     vip-boot try-kernel <release> [--no-reboot]   stage /boot/vmlinuz-<release> in the spare slot, boot it once
     vip-boot try-args '<args>' [--no-reboot]      the running kernel with new tuned arguments, once
+    vip-boot set-args [--yes] [--restore]         rewrite every slot's tuned line from device.env
     vip-boot loose [--no-reboot]                  one boot in the loose profile
     vip-boot default tuned|loose                  the pedal's profile from now on
     vip-boot default pedal|rescue                 which root boots from now on
@@ -537,6 +538,81 @@ def cmd_try_args(board, args):
     try_candidate(board, args, board.release(active), " ".join(args.args.split()), from_active=True)
 
 
+def args_word_diff(have, new):
+    """The words that differ, as "+new -old". The generated lines share everything but the tuning
+    arguments, so this is what a person is being asked to approve."""
+    a, b = set(have.split()), set(new.split())
+    parts = [f"+{w}" for w in new.split() if w not in a] + [f"-{w}" for w in have.split() if w not in b]
+    return " ".join(parts) or "(no word differs: the order or the spacing does)"
+
+
+def cmd_set_args(board, args):
+    """Rewrite the slots' tuned command line from device.env, keeping what it replaces.
+
+    The tuning arguments reach a boot tree only when the tree is built (`init-pedal-boot`, from the
+    image build), which is right for a card and useless for a board that is already up: changing CPU
+    isolation, IRQ affinity or the tick means rewriting `cmdline-tuned.txt` in the slots. Until this
+    existed the only way was to stage a whole kernel through `try-kernel` — a bigger hammer than the
+    change deserves, and one that leaves the other slot on the old arguments, so a fallback boots
+    into a layout the pedal's rules no longer describe.
+
+    So: every slot, in one pass, with the file it replaced kept beside it, and `--restore` to put it
+    back (the rescue-root path, if a rewritten line ever fails to boot). It writes nothing without
+    `--yes`, and it refuses to guess: a missing file means this is not a pedal boot tree.
+    """
+    board.need_pedal_boot()
+    want = " ".join(board.env["AUDIO_TUNING_ARGS"].split())
+    if not want:
+        die("AUDIO_TUNING_ARGS is empty: refusing to write a command line with no tuning in it")
+
+    if args.restore:
+        for s in board.slots:
+            baks = sorted(f for f in os.listdir(board.slot_dir(s))
+                          if f.startswith("cmdline-tuned.txt.bak-"))
+            if not baks:
+                die(f"slot {s}: nothing to restore (no cmdline-tuned.txt.bak-*)")
+            write_new(os.path.join(board.slot_dir(s), "cmdline-tuned.txt"),
+                      read(os.path.join(board.slot_dir(s), baks[-1])))
+            log(f"slot {s}: restored {baks[-1]}")
+        subprocess.run(["sync"])
+        log("reboot to pick it up")
+        return
+
+    plan = []
+    for s in board.slots:
+        path = os.path.join(board.slot_dir(s), "cmdline-tuned.txt")
+        have = read(path)
+        if not have.strip():
+            die(f"{path} is missing: this is not a pedal boot tree")
+        plan.append((s, path, have, cmdline(board.env, s, "tuned", want)))
+
+    changed = [p for p in plan if p[2] != p[3]]
+    if not changed:
+        log("every slot already says what device.env says")
+        return
+    for s, _, have, new in changed:
+        log(f"slot {s}: {args_word_diff(have, new)}")
+    if not args.yes:
+        die("nothing written: --yes rewrites the slots, then reboot")
+
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    for s, path, have, new in changed:
+        write_new(path + f".bak-{stamp}", have)
+        write_new(path, new)
+        write_new(os.path.join(board.slot_dir(s), "tuned.args"), want + "\n")
+    for s, path, _, new in changed:
+        # Read it back: this is a boot-critical file, and a write that did not land is the one
+        # failure that would be discovered by a board that does not come up.
+        if read(path) != new:
+            die(f"slot {s}: {path} did not read back what was written")
+    subprocess.run(["sync"])
+    log(f"{len(changed)} slot(s) written, previous line beside it as .bak-{stamp}")
+    if args.reboot:
+        board.reboot(None)
+    else:
+        log("reboot to pick it up; `vip-boot set-args --restore` puts the old line back")
+
+
 def need_loose_target(board):
     """The loose profile boots systemd.unit=<target>. If that target isn't installed, systemd
     drops to emergency mode: no network, and nothing brings it back but a power cycle."""
@@ -815,6 +891,7 @@ def main(argv=None):
     sub.add_parser("status")
     s = sub.add_parser("try-kernel"); s.add_argument("release"); s.add_argument("--no-reboot", action="store_true")
     s = sub.add_parser("try-args"); s.add_argument("args"); s.add_argument("--no-reboot", action="store_true")
+    s = sub.add_parser("set-args"); s.add_argument("--yes", action="store_true"); s.add_argument("--restore", action="store_true"); s.add_argument("--reboot", action="store_true")
     s = sub.add_parser("loose"); s.add_argument("--no-reboot", action="store_true")
     s = sub.add_parser("default"); s.add_argument("what", choices=PROFILES + ("pedal", "rescue"))
     s = sub.add_parser("rescue"); s.add_argument("--stay", action="store_true"); s.add_argument("--no-reboot", action="store_true")
@@ -855,6 +932,7 @@ def main(argv=None):
     board = Board(env)
     try:
         {"status": cmd_status, "try-kernel": cmd_try_kernel, "try-args": cmd_try_args,
+         "set-args": cmd_set_args,
          "loose": cmd_loose, "default": cmd_default, "rescue": cmd_rescue, "stay": cmd_stay, "try-pedal": cmd_try_pedal,
          "settle": cmd_settle, "validate": cmd_validate,
          "guard-clear": cmd_guard_clear, "deadline": cmd_deadline}[args.cmd](board, args)

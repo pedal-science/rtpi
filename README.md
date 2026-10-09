@@ -82,6 +82,23 @@ kernel with the same release string is a different kernel — the release string
 that separates two module sets, which is why trials get their own suffix
 (`--localversion -numaemu2-trimmed`) and go through `vip-try` before anything pins them.
 
+### Changing the boot arguments on a board that is already up
+
+`AUDIO_TUNING_ARGS` reaches a boot tree only when the tree is built (`init-pedal-boot`, from the
+image build). For a board that is already running, `vip-boot set-args` rewrites every slot's
+`cmdline-tuned.txt` from `devices/vip/device.env` in one pass and keeps what it replaced:
+
+```bash
+ssh vip sudo vip-boot set-args            # print the diff; writes nothing
+ssh vip sudo vip-boot set-args --yes      # write it, then reboot
+ssh vip sudo vip-boot set-args --restore  # from any root: put the previous line back
+```
+
+It stages no kernel and promotes no slot, so the recovery ladder below is unchanged, and both
+slots move together — a fallback that boots the old arguments is a boot into a layout the pedal's
+rules no longer describe. `make vip-try` / `vip-boot try-kernel` remain the heavier route, which is
+what a *new kernel* needs.
+
 ### Testing
 
 ```bash
