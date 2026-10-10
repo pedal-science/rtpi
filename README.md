@@ -161,14 +161,15 @@ The profile has two halves, installed separately and on purpose:
 
 ```bash
 make piv-audio-tune       # runtime: IRQ pinning + priority. Reverts on reboot.
-make piv-audio-boot-args  # boot: CPU isolation. Goes through tryboot.
+make piv-audio-boot-args  # boot: CPU isolation, via the tryboot one-shot (stages the kernel)
 make piv-audio-status     # is it actually in force?
+ssh piv sudo piv-boot set-args   # boot: the small route -- rewrite cmdline.txt, no kernel staged
 ```
 
 | half | what it does | risk | rollback |
 |---|---|---|---|
-| runtime (`rtpi-audio-tune`) | pins the audio interrupt to a reserved core, raises its thread to SCHED_FIFO 85 | none — changes nothing that boots | power cycle |
-| boot (`AUDIO_TUNING_ARGS`) | `isolcpus` / `nohz_full` / `rcu_nocbs` on cores 2-3, `irqaffinity` to 0-1, `skew_tick` | can stop the machine booting | tryboot one-shot, same as a bad kernel |
+| runtime (`rtpi-audio-tune`) | pins the audio interrupt to reserved core 1, raises its thread to SCHED_FIFO 85 | none — changes nothing that boots | power cycle |
+| boot (`AUDIO_TUNING_ARGS`) | `isolcpus` / `nohz_full` / `rcu_nocbs` on cores 1-3, `irqaffinity` to 0, `skew_tick` | can stop the machine booting | tryboot one-shot (same as a bad kernel), or `piv-boot set-args --restore` |
 
 Install the runtime half first. It is the part you can test immediately and undo with a
 power cycle, so it is how you find out whether this board's interrupt controller honours
@@ -177,6 +178,8 @@ affinity **before** committing to a reboot with changed boot arguments.
 The boot half stages the *same kernel* as the candidate and changes only the command
 line. That is a deliberately clean experiment: the one difference between candidate and
 known-good is the arguments, so a failure to come back is unambiguously the arguments.
+`piv-boot set-args` is the same experiment without the staging: one file, one reboot, and
+the line it replaced kept beside it.
 
 ### Measured effect
 
@@ -199,6 +202,11 @@ that can no longer spread onto 2-3, so the worst outlier moving there is the tun
 working, not failing. Maxima are rare events and 60s under-samples them; the percentiles,
 drawn from 45k-180k samples per core, are the robust comparison. `report.sh` therefore
 ranks a tuning change on p99.9 and prints max alongside, rather than ranking on max.
+
+**These figures are the pre-2026-10-09 split** (cores 2-3 reserved, 0-1 housekeeping). The
+amended rules reserve 1-3 and leave core 0 to do everything else, so the same rig on the
+current arguments is a *different* experiment and has not been re-measured; `piv-boot
+set-args` is how the boot half moves to it.
 
 A 300s run of the promoted config (900k/450k/225k samples) gives p99 22/27/31us, p99.9
 42/50/58us, max 126/182/139us — worst case 6.8% of its period budget — holding 2400MHz
