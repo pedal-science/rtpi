@@ -23,6 +23,18 @@ CONFIG_USB_ACM=m
 CONFIG_INET_DIAG=m
 CONFIG_INET_TCP_DIAG=m
 CONFIG_INET_MPTCP_DIAG=m
+# vc4, v3d — the pedal's screen (pedal.project D14: rigpa on the Core host). vc4 is the display
+# controller and HDMI (KMS, what Qt's eglfs_kms drives), v3d the GPU Mesa renders with. Nothing
+# loads them until config-pedal.txt carries dtoverlay=vc4-kms-v3d, so the trim can never see them:
+# the same self-fulfilling absence as cdc_acm. Their helpers (KMS, GEM, the HDMI audio codec) are
+# selected by these two and need no line of their own.
+CONFIG_DRM_VC4=m
+CONFIG_DRM_V3D=m
+# usbhid, hid-generic, hid-multitouch — the screen's touch digitiser, on USB. Nothing HID is
+# attached to vip today, so these too are absent from /proc/modules until the screen is.
+CONFIG_USB_HID=m
+CONFIG_HID_GENERIC=m
+CONFIG_HID_MULTITOUCH=m
 #
 # Note on ac97_bus and snd_compress: the board loads both, but only as dependency edges out
 # of snd-soc-core (its selectors, SND_SOC_AC97_BUS and SND_SOC_COMPRESS, were on because of
