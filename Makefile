@@ -116,12 +116,14 @@ piv-audio-status: ## Show whether the audio tuning is actually in force on piv
 	          grep -E "xhci-hcd:usb2" /proc/interrupts; \
 	          ps -eLo tid,psr,cls,rtprio,comm= | grep "irq/.*xhci-hcd:usb2"'
 
-# The small route for the boot half: one file, no kernel staged. Like piv-boot set-args itself,
-# these show what they would do until given --yes; the reboot is then a separate, deliberate act.
+# The small route for the boot half: one file, no kernel staged, and no candidate behind the
+# change -- that is `piv-audio-boot-args` above, which is the one to use for an argument set
+# that has not been booted before. Like piv-boot set-args itself, these show what they would do
+# until given --yes; the reboot is then a separate, deliberate act.
 .PHONY: piv-boot-status piv-boot-args
 piv-boot-status: ## Show piv's card, running and proposed command lines (writes nothing)
 	@ssh piv sudo piv-boot status
-piv-boot-args: ## Rewrite piv's cmdline.txt from AUDIO_TUNING_ARGS (shows the diff; add ARGS to write)
+piv-boot-args: ## Rewrite the ACTIVE cmdline.txt from AUDIO_TUNING_ARGS (shows the diff; add ARGS to write)
 	@ssh piv sudo piv-boot set-args $(ARGS)
 
 .PHONY: piv-ubuntu-rt piv-vendor-rt

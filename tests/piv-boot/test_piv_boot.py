@@ -2,14 +2,22 @@
 
     python3 -m unittest discover -s tests/piv-boot -v
 
-Each test builds a fake piv under a temporary PIVBOOT_PREFIX: a boot partition holding the one
-command line piv boots (cmdline.txt), a device.env beside it, a /proc/cmdline saying what is
+Each test builds a fake piv under a temporary PIVBOOT_PREFIX: a boot partition holding the
+config.txt piv's card carries and, under the os_prefix it names for a normal boot (`current/`),
+the one command line that boot tree boots; a device.env beside it, a /proc/cmdline saying what is
 running now, and a reboot command that records that it was called instead of rebooting.
+
+That layout is the point of half this suite. The firmware reads
+`<BOOT_MOUNT>/<os_prefix>cmdline.txt` -- `/boot/firmware/current/cmdline.txt` on piv -- and a
+`cmdline.txt` in the root of the boot partition is a leftover nothing reads. `self.card()` is the
+file the firmware reads; `self.root_cmdline()` is the leftover, kept so the tests can prove the
+tool does not go back to it.
 
 The case this suite exists for is the one on the bench: the card still carries the old CPU
 profile (`isolcpus=managed_irq,domain,2-3`) while devices/piv/device.env and
 devices/piv/etc/rtpi/audio-tune.conf have moved to 1-3.
 """
+import glob
 import importlib.machinery
 import importlib.util
 import os
@@ -35,6 +43,35 @@ loader.exec_module(pb)
 OLD_TUNING = "isolcpus=managed_irq,domain,2-3 nohz_full=2-3 rcu_nocbs=2-3 irqaffinity=0-1"
 NEW_TUNING = "isolcpus=managed_irq,domain,1-3 nohz_full=1-3 rcu_nocbs=1-3 irqaffinity=0 skew_tick=1"
 
+# piv's boot partition, as devices/piv/backups/*/config.txt records it: the [all] at the head
+# names the tree a normal boot reads, and the [tryboot] between the two [all]s names the candidate
+# the one-shot flag selects. The second [all] resets that filter, which is why the firmware does
+# not read new/ on an ordinary boot.
+CARD_CONFIG = """[all]
+os_prefix=current/
+
+[tryboot]
+os_prefix=new/
+
+[all]
+arm_64bit=1
+kernel=vmlinuz
+cmdline=cmdline.txt
+initramfs initrd.img followkernel
+"""
+
+# The root of the boot partition on a card that predates the slots (or has never been staged).
+ROOT_CONFIG = """[all]
+arm_64bit=1
+kernel=vmlinuz
+cmdline=cmdline.txt
+"""
+
+# What piv's /boot/firmware/cmdline.txt holds today: a leftover from before the slots, one
+# option long, which the firmware has not read since os_prefix arrived and piv-boot used to
+# rewrite. It is here so a test can prove the tool no longer touches it.
+ROOT_LEFTOVER = "video=HDMI-A-1:1920x1080@60D"
+
 
 def cmdline_text(tuning=OLD_TUNING, root="root=LABEL=writable", extra="", newline=False):
     """A plausible /boot/firmware/cmdline.txt: the tuning arguments in the middle of the line,
@@ -51,15 +88,19 @@ class FakePiv(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="pivboot-")
         self.boot = f"{self.root}/boot/firmware"
+        self.live = f"{self.boot}/current"
         os.makedirs(f"{self.root}/etc/rtpi")
-        os.makedirs(self.boot)
+        os.makedirs(self.live)
         os.makedirs(f"{self.root}/run")
         os.makedirs(f"{self.root}/proc")
         shutil.copy(ENV, f"{self.root}/etc/rtpi/device.env")
         self.env_path = f"{self.root}/etc/rtpi/device.env"
         self.env = pb.read_env(ENV)
-        with open(f"{self.boot}/cmdline.txt", "w") as f:
+        self.write_config(CARD_CONFIG)
+        with open(self.card_path(), "w") as f:
             f.write(cmdline_text())
+        with open(self.root_cmdline(), "w") as f:
+            f.write(ROOT_LEFTOVER)
         self.boot_as(OLD_TUNING)
         self.reboots = f"{self.root}/reboots"
         with open(f"{self.root}/reboot", "w") as f:
@@ -70,6 +111,10 @@ class FakePiv(unittest.TestCase):
         shutil.rmtree(self.root)
 
     # --- the fake board
+    def write_config(self, text):
+        with open(f"{self.boot}/config.txt", "w") as f:
+            f.write(text)
+
     def boot_as(self, tuning):
         with open(f"{self.root}/proc/cmdline", "w") as f:
             f.write(cmdline_text(tuning=tuning, newline=True))
@@ -87,14 +132,33 @@ class FakePiv(unittest.TestCase):
         with open(path) as f:
             return f.read()
 
+    def said(self, r):
+        """Everything the run said, wherever it said it."""
+        return r.stdout + r.stderr
+
+    def write_card(self, text):
+        with open(self.card_path(), "w") as f:
+            f.write(text)
+
+    def card_path(self):
+        """The file the firmware reads: <BOOT_MOUNT>/<os_prefix>cmdline.txt."""
+        return f"{self.live}/cmdline.txt"
+
+    def root_cmdline(self):
+        """The stale /boot/firmware/cmdline.txt piv really carries, which nothing reads."""
+        return f"{self.boot}/cmdline.txt"
+
     def card(self):
-        return self.read(f"{self.boot}/cmdline.txt")
+        return self.read(self.card_path())
 
     def card_tokens(self):
         return pb.lines_of(self.card())[0]
 
     def backups(self):
-        return sorted(f for f in os.listdir(self.boot) if f.startswith("cmdline.txt.bak-"))
+        """The backups of the live command line: none, when the tree itself is not there."""
+        if not os.path.isdir(self.live):
+            return []
+        return sorted(f for f in os.listdir(self.live) if f.startswith("cmdline.txt.bak-"))
 
     def reboots_seen(self):
         return self.read(self.reboots).split("\n")[:-1] if os.path.exists(self.reboots) else []
@@ -134,17 +198,17 @@ class TestStatus(FakePiv):
 
     def test_status_writes_nothing(self):
         before = self.card()
-        os.utime(f"{self.boot}/cmdline.txt", (1000000000, 1000000000))
+        os.utime(self.card_path(), (1000000000, 1000000000))
         self.run_pb("status")
         self.assertEqual(self.card(), before)
         self.assertEqual(self.backups(), [])
-        self.assertEqual(os.path.getmtime(f"{self.boot}/cmdline.txt"), 1000000000)
+        self.assertEqual(os.path.getmtime(self.card_path()), 1000000000)
         self.assertEqual(self.reboots_seen(), [])
 
     def test_status_survives_a_line_it_would_refuse_to_write(self):
         """A card that is already in a state this tool would not write is exactly when someone
         runs status; it has to report rather than fail."""
-        with open(f"{self.boot}/cmdline.txt", "w") as f:
+        with open(self.card_path(), "w") as f:
             f.write(cmdline_text().replace(" rd.emergency=reboot", ""))
         r = self.run_pb("status")
         self.assertIn("refused", r.stdout)
@@ -212,7 +276,7 @@ class TestRewriting(FakePiv):
         self.assertLess(after.index("isolcpus=managed_irq,domain,1-3"), after.index("rd.shell=0"))
 
     def test_appends_when_the_card_has_no_tuning_at_all(self):
-        with open(f"{self.boot}/cmdline.txt", "w") as f:
+        with open(self.card_path(), "w") as f:
             f.write(cmdline_text(tuning="").replace("  ", " "))
         self.run_pb("set-args", "--yes")
         self.assertEqual(self.card_tokens()[-len(NEW_TUNING.split()):], NEW_TUNING.split())
@@ -241,23 +305,29 @@ class TestRewriting(FakePiv):
         self.assertEqual(self.reboots_seen(), ["called"])
 
     def test_a_missing_cmdline_is_not_a_piv_boot_tree(self):
-        os.remove(f"{self.boot}/cmdline.txt")
+        os.remove(self.card_path())
         r = self.run_pb("set-args", "--yes", check=False)
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("not a piv boot tree", r.stderr)
+        self.assertIn("does not exist", r.stderr)
+        self.assertIn(f"{self.live}/cmdline.txt", r.stderr,
+                      "the refusal has to say which path it looked for")
 
     def test_the_line_is_written_whole_or_not_at_all(self):
         """The write goes to a temporary name and is renamed over the file, so a reader never
-        sees half a command line."""
+        sees half a command line. It happens inside the tree os_prefix names, beside the
+        backups, and never in the root of the boot partition."""
         self.run_pb("set-args", "--yes")
-        self.assertEqual(os.listdir(self.boot),
+        self.assertEqual(os.listdir(self.live),
                          sorted(["cmdline.txt"] + self.backups()))
-        self.assertNotIn("cmdline.txt.tmp", os.listdir(self.boot))
+        self.assertNotIn("cmdline.txt.tmp", os.listdir(self.live))
+        self.assertEqual(os.listdir(self.boot), sorted(["cmdline.txt", "config.txt", "current"]))
+        self.assertEqual(self.read(self.root_cmdline()), ROOT_LEFTOVER,
+                         "the leftover at the root of the boot partition is never written")
 
     def test_a_line_with_no_trailing_newline_stays_that_way(self):
         self.run_pb("set-args", "--yes")
         self.assertFalse(self.card().endswith("\n"))
-        with open(f"{self.boot}/cmdline.txt", "w") as f:
+        with open(self.card_path(), "w") as f:
             f.write(cmdline_text(tuning=OLD_TUNING, newline=True))
         self.run_pb("set-args", "--yes")
         self.assertTrue(self.card().endswith("\n"))
@@ -282,7 +352,7 @@ class TestRefusals(FakePiv):
         be missing them: a device.env that dropped rd.emergency= is a refusal, not an agreement.
         The card has to be in the same state, because a safety argument already on the line is
         kept -- this is about the tool never *writing* a line without one."""
-        with open(f"{self.boot}/cmdline.txt", "w") as f:
+        with open(self.card_path(), "w") as f:
             f.write(cmdline_text().replace("rd.emergency=reboot ", ""))
         path = self.env_copy(DRACUT_SAFETY_ARGS="rd.shell=0 rd.retry=60 rd.timeout=90")
         before = self.card()
@@ -305,14 +375,14 @@ class TestRefusals(FakePiv):
         self.assertEqual(self.backups(), [])
 
     def test_refuses_a_card_with_no_root(self):
-        with open(f"{self.boot}/cmdline.txt", "w") as f:
+        with open(self.card_path(), "w") as f:
             f.write(cmdline_text().replace("root=LABEL=writable ", ""))
         r = self.run_pb("set-args", "--yes", check=False)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("no root=", r.stderr)
 
     def test_refuses_a_card_with_two_roots(self):
-        with open(f"{self.boot}/cmdline.txt", "w") as f:
+        with open(self.card_path(), "w") as f:
             f.write(cmdline_text(extra="root=PARTUUID=deadbeef"))
         r = self.run_pb("set-args", "--yes", check=False)
         self.assertNotEqual(r.returncode, 0)
@@ -333,13 +403,146 @@ class TestRefusals(FakePiv):
         self.assertIn("initramfs", str(ctx.exception))
 
 
+class TestWhichCommandLineTheFirmwareReads(FakePiv):
+    """`os_prefix` decides, not the filename. The firmware reads
+    `<BOOT_MOUNT>/<os_prefix>cmdline.txt` on a normal boot, and piv's real card puts the live line
+    in `current/` while a leftover `cmdline.txt` sits at the root of the boot partition. Reading
+    the leftover is the fault this class exists for: it made `set-args` describe a file nobody
+    boots, and refuse a write nobody was making."""
+
+    def test_the_card_resolves_to_the_current_tree_and_writes_it(self):
+        r = self.run_pb("status")
+        self.assertIn(f"cmdline    {self.live}/cmdline.txt", r.stdout)
+
+        before_root = self.read(self.root_cmdline())
+        self.run_pb("set-args", "--yes")
+        self.assertIn(NEW_TUNING, self.card())
+        self.assertNotIn("isolcpus=managed_irq,domain,2-3", self.card())
+        self.assertEqual(os.listdir(self.live), sorted(["cmdline.txt"] + self.backups()),
+                         "the backup lands beside the file that was written")
+        self.assertEqual(self.read(self.root_cmdline()), before_root,
+                         "the leftover at the root is not the file the firmware reads")
+
+    def test_the_tryboot_prefix_is_not_the_active_one(self):
+        """`[tryboot] os_prefix=new/` describes the candidate the one-shot flag selects, and the
+        `[all]` under it resets that filter. Taking the tryboot one would edit the candidate
+        arm-try-piv.sh stages, with `current/` still what boots."""
+        os.makedirs(f"{self.boot}/new")
+        with open(f"{self.boot}/new/cmdline.txt", "w") as f:
+            f.write(cmdline_text(tuning="isolcpus=managed_irq,domain=0-3"))
+        self.run_pb("set-args", "--yes")
+        self.assertIn(NEW_TUNING, self.card())
+        self.assertEqual(sorted(os.listdir(f"{self.boot}/new")), ["cmdline.txt"],
+                         "a candidate in new/ is arm-try-piv.sh's to write, not this tool's")
+
+    def test_without_os_prefix_it_is_the_root_cmdline(self):
+        """A card with no os_prefix has no slots, so the file the firmware reads is the one in the
+        root of the boot partition -- which is what this tool did before os_prefix was read. The
+        directory the [tryboot] section names goes with it: nothing a normal boot reads is in it."""
+        shutil.rmtree(self.live)
+        self.write_config(ROOT_CONFIG)          # no os_prefix anywhere
+        with open(self.root_cmdline(), "w") as f:
+            f.write(cmdline_text())
+        r = self.run_pb("status")
+        self.assertIn(f"cmdline    {self.root_cmdline()}", r.stdout)
+        self.run_pb("set-args", "--yes")
+        self.assertIn(NEW_TUNING, self.read(self.root_cmdline()))
+        backups = [os.path.basename(b) for b in glob.glob(self.root_cmdline() + ".bak-*")]
+        self.assertLessEqual(len(backups), 1)
+        self.assertEqual(sorted(os.listdir(self.boot)),
+                         sorted(["cmdline.txt", "config.txt"] + backups),
+                         "no current/ tree: the backup lands beside the file written")
+
+    def test_an_os_prefix_that_names_no_directory_is_refused(self):
+        shutil.rmtree(self.live)
+        before_root = self.read(self.root_cmdline())
+        r = self.run_pb("set-args", "--yes", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("os_prefix=current", r.stderr)
+        self.assertIn(f"{self.live} is not a directory", r.stderr)
+        self.assertIn("refusing", r.stderr)
+        self.assertFalse(os.path.exists(self.live), "a refusal writes nothing, not even a tree")
+        self.assertEqual(self.read(self.root_cmdline()), before_root)
+        self.assertEqual(self.backups(), [])
+
+    def test_an_os_prefix_whose_tree_has_no_cmdline_is_refused(self):
+        os.remove(self.card_path())
+        r = self.run_pb("set-args", "--yes", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(f"{self.live}/cmdline.txt does not exist", r.stderr)
+
+    def test_status_shows_both_what_it_reads_and_what_it_would_write(self):
+        r = self.run_pb("status")
+        self.assertIn(f"cmdline    {self.live}/cmdline.txt", r.stdout)
+        self.assertIn(f"writes     {self.live}/cmdline.txt", r.stdout)
+
+    def test_set_args_says_which_file_before_it_writes_it(self):
+        said = self.said(self.run_pb("set-args"))
+        self.assertIn(self.live, said)
+        said = self.said(self.run_pb("set-args", "--yes"))
+        self.assertIn(self.live, said)
+
+    def test_file_still_overrides_the_resolution(self):
+        """The escape hatch stays an escape hatch: an operator who names a file means that file,
+        and the tool prints it rather than the one os_prefix points at."""
+        other = f"{self.boot}/somewhere-else.txt"
+        with open(other, "w") as f:
+            f.write(cmdline_text())
+        r = self.run_pb("--file", other, "status")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn(other, r.stdout)
+
+
+class TestWhatARefusalSays(FakePiv):
+    """Two different things, said as two different things: the exact arguments device.env requires
+    and the line does not carry, and the safety keys the line has no argument for at all. The
+    second used to go into the first as a literal `key<value>` token, which read as though the
+    card were meant to hold that placeholder."""
+
+    def test_a_refusal_says_which_arguments_are_missing_and_which_keys(self):
+        self.write_card(cmdline_text().replace("rd.shell=0 ", ""))
+        path = self.env_copy(DRACUT_SAFETY_ARGS="rd.shell=0 rd.emergency=reboot rd.retry=60 "
+                                                "rd.timeout=90 rd.debug=1")
+        r = self.run_pb("set-args", "--yes", check=False, env_path=path)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("rd.debug=1", r.stderr)
+        self.assertIn("arguments", r.stderr, "the exact argument device.env asks for")
+        self.assertIn("keys", r.stderr, "and the key the line has no argument for at all")
+        # The two sentences are separate, so the key is reported as a key...
+        self.assertIn("no argument for at all: rd.shell", r.stderr)
+        # ...and the argument device.env asks for is reported among the arguments, twice over:
+        # once as something to write and once as something the line lost.
+        self.assertIn("missing from it: rd.shell=0", r.stderr)
+
+    def test_the_word_value_cannot_appear_in_a_refusal(self):
+        """The literal text `<value>` is not an argument and never was: it is a hole in a message
+        that told whoever read it the card should contain a placeholder."""
+        for broken in (cmdline_text().replace("rd.shell=0 ", ""),
+                       cmdline_text().replace("rd.timeout=90 ", "")):
+            self.write_card(broken)
+            r = self.run_pb("set-args", "--yes", check=False)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("safety keys", r.stderr, "the refusal still says what is wrong")
+            self.assertNotIn("<value>", self.said(r))
+
+    def test_check_line_says_the_two_things_separately(self):
+        """check_line is the one gate, so it is where the message is checked without a fake card."""
+        with self.assertRaises(ValueError) as ctx:
+            pb.check_line(cmdline_text().replace("rd.shell=0 ", "").split(), self.env)
+        said = str(ctx.exception)
+        self.assertIn("safety arguments that are missing from it: rd.shell=0", said)
+        self.assertIn("safety keys it has no argument for at all: rd.shell", said)
+        for key in pb.SAFETY_BASE:
+            self.assertNotIn(f"{key}<value>", said)
+
+
 class TestBackupAndRestore(FakePiv):
     def test_the_replaced_line_is_kept_beside_it_and_restored(self):
         before = self.card()
         self.run_pb("set-args", "--yes")
         self.assertEqual(len(self.backups()), 1)
         self.assertRegex(self.backups()[0], r"^cmdline\.txt\.bak-\d{8}T\d{6}Z$")
-        self.assertEqual(self.read(f"{self.boot}/{self.backups()[0]}"), before)
+        self.assertEqual(self.read(f"{self.live}/{self.backups()[0]}"), before)
         self.assertIn("isolcpus=managed_irq,domain,1-3", self.card())
 
         self.run_pb("set-args", "--restore")
@@ -354,7 +557,7 @@ class TestBackupAndRestore(FakePiv):
     def test_restore_refuses_a_backup_that_would_move_the_root(self):
         """A backup of a different root is a root change, not a boot-argument change: it is
         refused unless the caller says --root in as many words."""
-        stale = f"{self.boot}/cmdline.txt.bak-20260101T000000Z"
+        stale = f"{self.live}/cmdline.txt.bak-20260101T000000Z"
         with open(stale, "w") as f:
             f.write(cmdline_text(root="root=LABEL=elsewhere", newline=True))
         r = self.run_pb("set-args", "--restore", check=False)
@@ -366,7 +569,7 @@ class TestBackupAndRestore(FakePiv):
         self.assertIn("root=LABEL=elsewhere", self.card())
 
     def test_restore_refuses_a_backup_that_lost_a_safety_argument(self):
-        stale = f"{self.boot}/cmdline.txt.bak-20260101T000000Z"
+        stale = f"{self.live}/cmdline.txt.bak-20260101T000000Z"
         with open(stale, "w") as f:
             f.write(cmdline_text().replace("rd.shell=0 ", "") + "\n")
         r = self.run_pb("set-args", "--restore", check=False)
@@ -392,12 +595,12 @@ class TestIdempotence(FakePiv):
     def test_running_it_twice_changes_nothing_and_adds_no_backup(self):
         self.run_pb("set-args", "--yes")
         once, backups = self.card(), list(self.backups())
-        mtime = os.path.getmtime(f"{self.boot}/cmdline.txt")
+        mtime = os.path.getmtime(self.card_path())
         r = self.run_pb("set-args", "--yes")
         self.assertIn("already says what device.env says", r.stderr)
         self.assertEqual(self.card(), once)
         self.assertEqual(self.backups(), backups, "no second backup for a line already in place")
-        self.assertEqual(os.path.getmtime(f"{self.boot}/cmdline.txt"), mtime)
+        self.assertEqual(os.path.getmtime(self.card_path()), mtime)
         # and the card still has exactly one copy of each argument
         self.assertEqual(self.card_tokens().count("skew_tick=1"), 1)
         self.assertEqual(self.card().count("rd.emergency=reboot"), 1)
@@ -406,7 +609,7 @@ class TestIdempotence(FakePiv):
         """Move the card back to the old profile underneath the tool, as a board that was
         rewritten by hand would be, and check the rewrite is still not additive."""
         self.run_pb("set-args", "--yes")
-        with open(f"{self.boot}/cmdline.txt", "w") as f:
+        with open(self.card_path(), "w") as f:
             f.write(cmdline_text(tuning=OLD_TUNING + " skew_tick=1"))
         self.run_pb("set-args", "--yes")
         tokens = self.card_tokens()
@@ -419,7 +622,7 @@ class TestIdempotence(FakePiv):
         """set-args is meant to be run repeatedly while a profile is worked out, and piv's boot
         partition is 505M: old command lines must not accumulate, however many runs it takes."""
         for _ in range(4):
-            with open(f"{self.boot}/cmdline.txt", "w") as f:
+            with open(self.card_path(), "w") as f:
                 f.write(cmdline_text(tuning="isolcpus=managed_irq,domain=2-3"))
             self.run_pb("set-args", "--yes")
             self.run_pb("set-args", "--restore", "--yes")
@@ -435,12 +638,12 @@ class TestIdempotence(FakePiv):
         self.run_pb("set-args", "--yes")
         tuned = self.card()
         self.assertNotEqual(old, tuned)
-        with open(f"{self.boot}/cmdline.txt", "w") as f:
+        with open(self.card_path(), "w") as f:
             f.write(cmdline_text(tuning="isolcpus=managed_irq,domain=1-2"))
         second = self.card()
         self.run_pb("set-args", "--yes")                  # a second write, same second
         self.assertEqual(self.card(), tuned)
-        kept = [self.read(f"{self.boot}/{b}") for b in self.backups()]
+        kept = [self.read(f"{self.live}/{b}") for b in self.backups()]
         self.assertIn(old, kept, "the line the first write replaced")
         self.assertIn(second, kept, "the line the second write replaced")
         self.assertEqual(len(set(self.backups())), len(self.backups()), "distinct names")

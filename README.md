@@ -90,7 +90,7 @@ already running onto the arguments in `device.env`, with no kernel staged and no
 
 ```bash
 ssh vip sudo vip-boot set-args            # every slot's cmdline-tuned.txt, in one pass
-ssh piv sudo piv-boot set-args            # piv's one /boot/firmware/cmdline.txt
+ssh piv sudo piv-boot set-args            # the tree os_prefix names: current/cmdline.txt
 
 # both: print the diff and the proposed line, and write nothing
 ssh vip sudo vip-boot set-args
@@ -104,9 +104,12 @@ ssh piv sudo piv-boot set-args --restore
 ```
 
 On vip both slots move together, because a fallback that boots the old arguments is a boot into a
-layout the pedal's rules no longer describe. On piv there is one command line in one partition
-(`BOOT_MOUNT` in `devices/piv/device.env`), so `piv-boot` rewrites that file, keeps what it
-replaced as `cmdline.txt.bak-<UTC stamp>`, and `--restore` puts the newest one back.
+layout the pedal's rules no longer describe. On piv there is one command line that applies — the
+one in the tree `os_prefix` selects for a normal boot — so `piv-boot` reads `config.txt`, resolves
+`<BOOT_MOUNT>/<os_prefix>cmdline.txt` (`/boot/firmware/current/cmdline.txt`), prints it, and
+rewrites that file; a `cmdline.txt` at the root of the boot partition is a leftover from before the
+slots that the firmware has not read since `os_prefix` arrived. It keeps what it replaced as
+`cmdline.txt.bak-<UTC stamp>` beside it, and `--restore` puts the newest one back.
 
 `piv-boot` only ever moves the arguments the audio profile owns; everything else on the line stays
 as it was. It refuses to write a line that would lose `rd.shell=` / `rd.emergency=` / `rd.retry=` /
@@ -114,16 +117,34 @@ as it was. It refuses to write a line that would lose `rd.shell=` / `rd.emergenc
 line it wrote back before it reports success. Running it twice does nothing the second time.
 Off the board, `tests/piv-boot/` checks all of that against a fake boot partition.
 
+**What `piv-boot set-args` is not.** It edits the *active* command line — the tree that boots — so
+there is no candidate behind the change and no automatic fallback: a line that does not boot needs a
+serial console, a card reader, or recovery step 5. The route the project designed for an argument
+change on piv is the one-shot,
+
+```bash
+scripts/safety/arm-try-piv.sh --expect "$(ssh piv uname -r)" --audio-tuning --reboot
+# or: make piv-audio-boot-args
+```
+
+which copies `current/` to `new/` so the candidate inherits the known-good command line, writes the
+safety arguments into `new/cmdline.txt` after `flash-kernel`, checks that the candidate holds a
+`vmlinuz` and a `.dtb` (without both, the firmware silently ignores `os_prefix`), and reboots once
+through tryboot, leaving `current/` bootable. `set-args` says so in its own output rather than
+refusing the write: it is the smaller tool for a board that is already up and a change small enough
+to be sure of.
+
 `make vip-try` / `vip-boot try-kernel`, and `make piv-audio-boot-args`, remain the heavier route,
 which is what a *new kernel* needs.
 
 ### The boot half of piv's audio profile
 
-The boot half can be applied two ways. Through the tryboot one-shot
-(`make piv-audio-boot-args`), which stages the running kernel as a candidate and lets the
-firmware's A/B ladder roll it back — the right hammer for a new kernel or for the first
-application of a profile; or, on a board that is already up, through `piv-boot set-args` above,
-which rewrites the one command line and can put it back.
+The route for the boot half is the tryboot one-shot (`make piv-audio-boot-args`), which stages the
+running kernel as a candidate and lets the firmware's A/B ladder roll it back — the right hammer for
+a new kernel, for the first application of a profile, and for any set of arguments that has not been
+booted before, since an argument set that does not come back is just as effective a way to lose a
+machine as a bad kernel. `piv-boot set-args` above is the smaller second route: one file, one
+reboot, no candidate behind it, for a board that is already up and arguments already known to boot.
 
 ### Testing
 
@@ -163,13 +184,13 @@ The profile has two halves, installed separately and on purpose:
 make piv-audio-tune       # runtime: IRQ pinning + priority. Reverts on reboot.
 make piv-audio-boot-args  # boot: CPU isolation, via the tryboot one-shot (stages the kernel)
 make piv-audio-status     # is it actually in force?
-ssh piv sudo piv-boot set-args   # boot: the small route -- rewrite cmdline.txt, no kernel staged
+ssh piv sudo piv-boot set-args   # boot: the small route -- rewrite the active line, no kernel staged
 ```
 
 | half | what it does | risk | rollback |
 |---|---|---|---|
 | runtime (`rtpi-audio-tune`) | pins the audio interrupt to reserved core 1, raises its thread to SCHED_FIFO 85 | none — changes nothing that boots | power cycle |
-| boot (`AUDIO_TUNING_ARGS`) | `isolcpus` / `nohz_full` / `rcu_nocbs` on cores 1-3, `irqaffinity` to 0, `skew_tick` | can stop the machine booting | tryboot one-shot (same as a bad kernel), or `piv-boot set-args --restore` |
+| boot (`AUDIO_TUNING_ARGS`) | `isolcpus` / `nohz_full` / `rcu_nocbs` on cores 1-3, `irqaffinity` to 0, `skew_tick` | can stop the machine booting | tryboot one-shot (same as a bad kernel, and it falls back by itself), or `piv-boot set-args --restore` for the in-place route |
 
 Install the runtime half first. It is the part you can test immediately and undo with a
 power cycle, so it is how you find out whether this board's interrupt controller honours
@@ -177,9 +198,10 @@ affinity **before** committing to a reboot with changed boot arguments.
 
 The boot half stages the *same kernel* as the candidate and changes only the command
 line. That is a deliberately clean experiment: the one difference between candidate and
-known-good is the arguments, so a failure to come back is unambiguously the arguments.
-`piv-boot set-args` is the same experiment without the staging: one file, one reboot, and
-the line it replaced kept beside it.
+known-good is the arguments, so a failure to come back is unambiguously the arguments — and
+because the candidate is a real slot, the failure comes back by itself. That is why it is the route
+for an argument set that has not been booted before. `piv-boot set-args` is the same experiment
+without the staging: one file, one reboot, no candidate, and the line it replaced kept beside it.
 
 ### Measured effect
 
@@ -205,8 +227,9 @@ ranks a tuning change on p99.9 and prints max alongside, rather than ranking on 
 
 **These figures are the pre-2026-10-09 split** (cores 2-3 reserved, 0-1 housekeeping). The
 amended rules reserve 1-3 and leave core 0 to do everything else, so the same rig on the
-current arguments is a *different* experiment and has not been re-measured; `piv-boot
-set-args` is how the boot half moves to it.
+current arguments is a *different* experiment and has not been re-measured;
+`arm-try-piv.sh --audio-tuning` (`make piv-audio-boot-args`) is how the boot half moves to it
+without risking the card.
 
 A 300s run of the promoted config (900k/450k/225k samples) gives p99 22/27/31us, p99.9
 42/50/58us, max 126/182/139us — worst case 6.8% of its period budget — holding 2400MHz

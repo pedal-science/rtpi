@@ -42,12 +42,16 @@ make test-piv              # latency and xrun suite; results go to results/
   compile stops the build. `dtc` is in the build container for that.
 - On piv: no custom kernel flavour names, no `threadirqs` on an RT kernel,
   `RT_GROUP_SCHED` off. `README.md` "Things that will bite you" says why.
-- **piv's boot arguments are changed in place, on the board that is already up**:
-  `devices/piv/usr/local/sbin/piv-boot set-args` rewrites `/boot/firmware/cmdline.txt` from
-  `AUDIO_TUNING_ARGS` in `devices/piv/device.env`, keeping every other argument and the line it
-  replaced; `--restore` puts that line back; `tests/piv-boot` tests it off the board
-  (`python3 -m unittest discover -s tests/piv-boot`). This is vip-boot's `set-args`, for the board
-  that has one command line and no slot — an *arguments* change needs no staged kernel. A new
-  kernel still goes through tryboot (`make piv-audio-boot-args`) as before.
+- **piv's designed route for an arguments change is the tryboot one-shot**:
+  `scripts/safety/arm-try-piv.sh --expect <release> --audio-tuning` (`make piv-audio-boot-args`)
+  stages `current/` as a candidate in `new/` with the tuned arguments, boots it once and falls back
+  by itself. The smaller route is `devices/piv/usr/local/sbin/piv-boot set-args`, which rewrites the
+  command line the firmware actually reads — `config.txt`'s `os_prefix` for a normal boot, so
+  `/boot/firmware/current/cmdline.txt`, never a `cmdline.txt` left at the root of the boot
+  partition — with `AUDIO_TUNING_ARGS` from `devices/piv/device.env`, keeping every other argument
+  and the line it replaced; `--restore` puts that line back; `tests/piv-boot` tests it off the board
+  (`python3 -m unittest discover -s tests/piv-boot`). It edits the *active* line in place, with no
+  candidate behind it and no automatic fallback, which is why an untested change goes through
+  tryboot instead. A new kernel still goes through tryboot as before.
 
 System context (the pedal, how the repos fit together, the plan): `~/code.local/pedal/pedal.project`, starting at its `CLAUDE.md` and `docs/working-across-repos.md`.

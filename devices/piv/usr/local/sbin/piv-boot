@@ -1,26 +1,42 @@
 #!/usr/bin/python3
-"""piv-boot — the tuned kernel command line on piv, without staging a kernel.
+"""piv-boot — the tuned kernel command line of the boot tree piv is actually booting.
 
     piv-boot status                     what is on the card, what is running, what would change
     piv-boot set-args                   show the proposed line and the difference; writes nothing
-    piv-boot set-args --yes             rewrite /boot/firmware/cmdline.txt, keeping the old one
+    piv-boot set-args --yes             rewrite the active command line, keeping the old one
     piv-boot set-args --restore         put the newest backup back
 
-WHY THIS EXISTS
+WHICH FILE THAT IS. piv's boot partition is Ubuntu's A/B layout, and `config.txt` chooses the boot
+tree with `os_prefix`: `[all]` names the one a normal boot uses (`current/` on piv) and `[tryboot]`
+names the candidate, which the firmware reads only while the one-shot tryboot flag is set. So the
+firmware reads `<BOOT_MOUNT>/<os_prefix>cmdline.txt` — on piv `/boot/firmware/current/cmdline.txt`
+— and a `cmdline.txt` in the root of the boot partition is a leftover from before the slots existed
+that nothing reads. This tool resolves the path the firmware would use, prints it, and rewrites
+that file; `--file` overrides the resolution outright, and a `config.txt` with no `os_prefix` falls
+back to `<BOOT_MOUNT>/cmdline.txt`.
 
-piv's boot arguments can only be changed on the candidate slot today: `make piv-audio-boot-args`
-runs `flash-kernel <release>` to stage a whole kernel and then arms it through the bootloader's
-tryboot flag (`scripts/safety/arm-try-piv.sh`). That is the right hammer for a new kernel, and
-the wrong one for a set of arguments: it needs a candidate in the untested state, it copies the
-running kernel's assets onto the card, and it can only reach a card that has a `new/` slot — so
-a board whose boot partition holds only `current/` cannot have its arguments changed this way at
-all.
+THE DESIGNED ROUTE FOR AN ARGUMENTS CHANGE IS NOT THIS TOOL. On piv it is
+`scripts/safety/arm-try-piv.sh --audio-tuning` (`make piv-audio-boot-args`): it copies `current/`
+to `new/` so the candidate inherits the known-good command line, writes the safety arguments and
+the tuned arguments into `new/cmdline.txt` after `flash-kernel`, sanity-checks that the candidate
+holds a `vmlinuz` and a `.dtb` (without both, the firmware silently ignores `os_prefix`), and
+reboots once through tryboot — leaving `current/` bootable so a candidate that does not come up
+falls back by itself. `arm-try-piv.sh` says this in its own header: the safety arguments
+deliberately do not go into `current/cmdline.txt`.
 
-vip has had the smaller tool for a while (`vip-boot set-args`, AGENTS.md, README "Changing the
-boot arguments on a board that is already up"): it rewrites the command lines from
-`devices/vip/device.env` on the board that is already up, keeps what it replaced, and `--restore`
-puts it back. This is the same tool for piv, deliberately the same shape, so that both boards are
-changed the same way and a reader only has to learn it once.
+`piv-boot set-args` is the other thing: it edits the ACTIVE command line (the `current/` tree) in
+place, so there is no candidate and no automatic fallback — if the line it writes does not boot,
+the board needs a serial console, a card reader or the recovery steps in README.md. That is why
+the project deliberately avoids it for an untested change, and why `set-args` says so in its
+output. It exists for the case the tryboot route does not fit: a board that is already up, a
+change small enough to be sure of, and a card with no candidate. No new gate was added: what
+`--yes` means is unchanged.
+
+vip has had the smaller tool for a while (`vip-boot set-args`, README "Changing the boot arguments
+on a board that is already up"): it rewrites the command lines from `devices/vip/device.env` on the
+board that is already up, keeps what it replaced, and `--restore` puts it back. This is the same
+tool for piv, deliberately the same shape, so that both boards are changed the same way and a
+reader only has to learn it once.
 
 WHAT MAKES IT SAFE
 
@@ -45,9 +61,11 @@ rather than as text:
     being asked twice (`--dry-run` still shows it first, the backup it would restore is checked
     exactly like a new line, and it makes no backup of its own — so it can be run again).
 
-There is no tryboot here and no slot: piv boots one command line from one partition (`BOOT_MOUNT`
-in device.env), so the whole change is that one file, and the way back is `--restore` (or the copy
-in devices/piv/backups/, or recovery step 5 in README.md).
+This tool does not stage a kernel and does not touch the firmware's one-shot flag: it edits the
+tree `os_prefix` selects for a normal boot (`current/`) where it lies, and the way back is
+`--restore` (or the copy in devices/piv/backups/, or recovery step 5 in README.md). A candidate
+staged in `new/` is not this tool's business — `arm-try-piv.sh` wrote it, and tryboot decides
+whether it becomes `current/`.
 
 IT DOES NOT REBOOT OR WRITE ANYTHING UNLESS ASKED
 
@@ -207,15 +225,25 @@ def roots_in(tokens):
 
 
 def check_line(tokens, env, was=None):
-    """Refuse a command line that would cost the board its remote access. Raises ValueError."""
-    missing = [w for w in required_arguments(env) if w not in tokens]
-    for key in SAFETY_BASE:
-        if not any(t.startswith(key) for t in tokens):
-            missing.append(f"{key}<value>")
-    if missing:
-        raise ValueError("the resulting command line would lose the safety arguments "
-                         f"{' '.join(missing)}: refusing to write it (piv would hang in the "
-                         "initramfs, where only a serial console reaches it)")
+    """Refuse a command line that would cost the board its remote access. Raises ValueError.
+
+    Two different things are reported as two different things: the exact arguments device.env
+    requires which the line does not carry, and the safety *keys* for which the line has no
+    argument at all. The second used to be appended to the first as `key<value>`, which read as
+    though the card were meant to hold that placeholder -- a message about the wrong thing, from
+    a check that was reading the wrong file.
+    """
+    missing_args = [w for w in required_arguments(env) if w not in tokens]
+    missing_keys = [key for key in SAFETY_BASE if not any(t.startswith(key) for t in tokens)]
+    if missing_args or missing_keys:
+        parts = []
+        if missing_args:
+            parts.append(f"the safety arguments that are missing from it: {' '.join(missing_args)}")
+        if missing_keys:
+            parts.append(f"the safety keys it has no argument for at all: {' '.join(missing_keys)}")
+        raise ValueError("the resulting command line would lose " + "; and ".join(parts)
+                         + ": refusing to write it (piv would hang in the initramfs, where only a "
+                           "serial console reaches it)")
 
     roots = roots_in(tokens)
     if not roots:
@@ -250,8 +278,77 @@ def boot_dir(env):
     return env.get("BOOT_MOUNT") or "/boot/firmware"
 
 
+def parse_os_prefix(text):
+    """The `os_prefix` a NORMAL boot uses, from config.txt. None when it names none.
+
+    The firmware's conditional filters are stateful and `[all]` resets them, so the value that
+    applies without the tryboot flag is the last `os_prefix=` that is not inside a `[tryboot]`
+    section: on piv that is the `[all] os_prefix=current/` at the head of the file, and the
+    `[tryboot] os_prefix=new/` below it describes the candidate the one-shot flag selects. Taking
+    the `[tryboot]` one would be taking the file this tool must not write -- `arm-try-piv.sh`
+    owns `new/cmdline.txt`.
+    """
+    prefix, skipped = None, False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            section = line.split("]", 1)[0][1:].strip().lower()
+            if section == "tryboot":
+                skipped = True
+            elif section in ("all", "none"):
+                skipped = section == "none"
+            continue
+        if skipped:
+            continue
+        key, sep, value = line.partition("=")
+        if sep and key.strip().lower() == "os_prefix":
+            # A value with a trailing comment, and the quoting config.txt accepts.
+            value = value.split("#", 1)[0].strip().strip('"').strip("'")
+            prefix = value
+    return prefix
+
+
+def os_prefix_dir(env):
+    """The directory prefix of the boot tree a normal boot reads, or None if config.txt names none.
+
+    Refuses (die) rather than fall back when config.txt names a directory that is not there: a
+    prefix the firmware would not find is a boot tree that is not booting, and reading the root
+    file instead would be the same mistake as before in the other direction.
+    """
+    config = os.path.join(p(boot_dir(env)), "config.txt")
+    try:
+        with open(config) as f:
+            text = f.read()
+    except OSError:
+        # No config.txt to read, so no prefix to honour: the file the firmware would read is the
+        # same one it read before the slots existed.
+        return None
+    prefix = parse_os_prefix(text)
+    if not prefix:
+        return None
+    where = prefix.rstrip("/") or "/"
+    # Concatenated rather than joined, so that the path in the message is the path in the
+    # firmware's own terms: `<mount>/current/cmdline.txt`.
+    target = p(boot_dir(env)) + "/" + prefix.strip("/")
+    if not os.path.isdir(target):
+        die(f"{config} says os_prefix={where}, but {target} is not a directory: refusing to "
+            f"guess which command line this board boots")
+    if not os.path.exists(target + "/cmdline.txt"):
+        die(f"{config} says os_prefix={where}, but {target}/cmdline.txt does not exist: "
+            "refusing to guess which command line this board boots")
+    return target
+
+
 def cmdline_path(env, path=None):
-    return path or os.path.join(p(boot_dir(env)), "cmdline.txt")
+    """The command line the firmware reads on a normal boot, as both a path to read and to write.
+
+    --file overrides this outright, because an operator who names a file means that file.
+    """
+    if path:
+        return path
+    return os.path.join(os_prefix_dir(env) or p(boot_dir(env)), "cmdline.txt")
 
 
 def read(path, default=""):
@@ -358,7 +455,11 @@ def proposal(env, have):
 
 def cmd_status(env, args):
     """Read-only, and it stays readable when the card is in a state this tool would refuse to
-    write: the refusal is printed as the change rather than raised."""
+    write: the refusal is printed as the change rather than raised.
+
+    It prints the path it resolved and the path it would write -- the same one, resolved once, so
+    that nobody has to work out again which of piv's command line files the firmware reads.
+    """
     path, have = current_line(env, args)
     tokens, _ = lines_of(have)
     try:
@@ -376,6 +477,7 @@ def cmd_status(env, args):
     print(f"kernel     {os.uname().release}")
     print(f"device     {args.env or p('/etc/rtpi/device.env')}")
     print(f"cmdline    {path}")
+    print(f"writes     {path}")
     print(f"running    {in_force or 'no tuning arguments'}"
           + ("" if in_force == on_card else
              "   (a reboot applies the card's line)" if on_card else "   (the card has none)"))
@@ -386,6 +488,22 @@ def cmd_status(env, args):
         print(f"backup     {os.path.basename(f)}")
     if not backups(path):
         print("restore    (nothing backed up yet)")
+
+
+def warn_about_the_route():
+    """Say, every time, which route the project designed for this and that this is not it.
+
+    The warning goes in the output rather than in a gate: `--yes` means what it meant before (the
+    tests define that interface), and a tool that refuses the case it was built for is a tool
+    somebody works around by hand.
+    """
+    log("on piv the designed route for an argument change is "
+        "`scripts/safety/arm-try-piv.sh --audio-tuning` (make piv-audio-boot-args): it stages the "
+        "candidate in new/ and keeps current/ bootable, so an argument set that does not come up "
+        "falls back by itself")
+    log("set-args edits the ACTIVE command line in place: there is no candidate behind it and no "
+        "automatic fallback, which is why the project deliberately avoids it for an untested "
+        "change")
 
 
 def cmd_set_args(env, args):
@@ -405,6 +523,8 @@ def cmd_set_args(env, args):
     if not difference:
         log(f"{path} already says what device.env says: nothing written, no backup")
         return
+    warn_about_the_route()
+    log(f"cmdline    {path} (the file the firmware reads, and the file that would be written)")
     log(f"{path}: {difference}")
     if args.dry_run or not args.yes:
         log("nothing written: --yes rewrites the command line, then reboot")
@@ -470,6 +590,7 @@ def cmd_restore(env, args, path, have):
     if old == have:
         log(f"{path} is already what {name} holds: nothing written")
         return
+    warn_about_the_route()
     log(f"{path}: {diff_words(tokens, old_tokens) or 'the same arguments, different whitespace'}")
     if args.dry_run:
         log(f"nothing written: `piv-boot set-args --restore` puts {name} back")
@@ -499,7 +620,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="piv-boot", description=__doc__.split("\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--env", help="device.env to read (default /etc/rtpi/device.env)")
-    ap.add_argument("--file", help="the command line to rewrite (default <BOOT_MOUNT>/cmdline.txt)")
+    ap.add_argument("--file", help="the command line to rewrite, instead of resolving it through "
+                                   "config.txt's os_prefix (default <BOOT_MOUNT>/<os_prefix>"
+                                   "cmdline.txt)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status")
     s = sub.add_parser("set-args")
