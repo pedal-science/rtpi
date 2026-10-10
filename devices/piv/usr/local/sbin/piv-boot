@@ -1,0 +1,528 @@
+#!/usr/bin/python3
+"""piv-boot — the tuned kernel command line on piv, without staging a kernel.
+
+    piv-boot status                     what is on the card, what is running, what would change
+    piv-boot set-args                   show the proposed line and the difference; writes nothing
+    piv-boot set-args --yes             rewrite /boot/firmware/cmdline.txt, keeping the old one
+    piv-boot set-args --restore         put the newest backup back
+
+WHY THIS EXISTS
+
+piv's boot arguments can only be changed on the candidate slot today: `make piv-audio-boot-args`
+runs `flash-kernel <release>` to stage a whole kernel and then arms it through the bootloader's
+tryboot flag (`scripts/safety/arm-try-piv.sh`). That is the right hammer for a new kernel, and
+the wrong one for a set of arguments: it needs a candidate in the untested state, it copies the
+running kernel's assets onto the card, and it can only reach a card that has a `new/` slot — so
+a board whose boot partition holds only `current/` cannot have its arguments changed this way at
+all.
+
+vip has had the smaller tool for a while (`vip-boot set-args`, AGENTS.md, README "Changing the
+boot arguments on a board that is already up"): it rewrites the command lines from
+`devices/vip/device.env` on the board that is already up, keeps what it replaced, and `--restore`
+puts it back. This is the same tool for piv, deliberately the same shape, so that both boards are
+changed the same way and a reader only has to learn it once.
+
+WHAT MAKES IT SAFE
+
+The command line is the one artefact in this repo that can cost a board its remote access: a line
+with no `root=`, or one that loses `rd.emergency=reboot`, hangs in the initramfs in a place only a
+serial console reaches (README, "The dracut lockout"). So this tool treats the file as dangerous
+rather than as text:
+
+  * it may only move the tuning arguments. Everything else is kept, in order, and only the tuning
+    keys change — including being REMOVED, which is how `isolcpus=managed_irq,domain,2-3` goes
+    away when the profile moves to 1-3;
+  * the line about to be written must contain every argument in DRACUT_SAFETY_ARGS and
+    PANIC_ARGS from device.env, and must carry `rd.shell=`, `rd.emergency=`, `rd.retry=`,
+    `rd.timeout=` and `panic=` whatever device.env says: a device.env that has lost one is a
+    refusal, not a silent agreement with itself;
+  * the line about to be written must carry the same `root=` it replaces. Missing, doubled or
+    changed, the write stops;
+  * nothing is written without `--yes`; every write is read back and re-parsed; the file it
+    replaces is kept beside it as `cmdline.txt.bak-<UTC stamp>`, and only the newest three are
+    kept. A second run with nothing to change writes nothing and adds no backup. `--restore` is
+    the exception on purpose: it is the way out of a line that will not boot, so it writes without
+    being asked twice (`--dry-run` still shows it first, the backup it would restore is checked
+    exactly like a new line, and it makes no backup of its own — so it can be run again).
+
+There is no tryboot here and no slot: piv boots one command line from one partition (`BOOT_MOUNT`
+in device.env), so the whole change is that one file, and the way back is `--restore` (or the copy
+in devices/piv/backups/, or recovery step 5 in README.md).
+
+IT DOES NOT REBOOT OR WRITE ANYTHING UNLESS ASKED
+
+`set-args` prints and stops. `--yes` writes; `--yes --reboot` also reboots, which is the one thing
+that applies the change.
+
+Paths are overridable for the tests: PIVBOOT_PREFIX is put in front of every absolute path,
+PIVBOOT_NO_MOUNT=1 skips the mount check, PIVBOOT_REBOOT names a command run instead of systemctl
+(tests/piv-boot/ does all three).
+"""
+import argparse
+import difflib
+import fcntl
+import glob
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+
+PREFIX = os.environ.get("PIVBOOT_PREFIX", "")
+
+# Required whatever device.env says: an initramfs with a shell, or one that waits for ever, is the
+# failure this tool exists to not cause. Held here as literal keys rather than read from device.env
+# so that a device.env which has lost one is a refusal and not a silent agreement with itself.
+SAFETY_BASE = ("rd.shell=", "rd.emergency=", "rd.retry=", "rd.timeout=", "panic=")
+
+# Only the newest few backups are kept, and only one per line replaced: these boot partitions are
+# small (piv's is 505M, BOOT_MIN_FREE_MB in device.env) and `set-args` is meant to be run more
+# than once while the profile is worked out.
+KEEP_BACKUPS = 3
+
+ROOT_RE = re.compile(r"^root=(.+)$")
+
+
+def p(path):
+    return PREFIX + path
+
+
+def log(msg):
+    print(f"piv-boot: {msg}", file=sys.stderr)
+
+
+def die(msg, code=1):
+    log(msg)
+    sys.exit(code)
+
+
+def stamp():
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+
+
+# ------------------------------------------------------------------ device facts
+
+def read_env(path=None):
+    """device.env: KEY=value or KEY="value" lines, parsed without a shell (as vip-boot does)."""
+    env = {}
+    with open(path or p("/etc/rtpi/device.env")) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            val = val.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                val = val[1:-1]
+            env[key.strip()] = val
+    return env
+
+
+def lines_of(text):
+    """(tokens, trailing) of a command line: shlex words, and the whitespace that ended it.
+
+    The trailing whitespace is kept so a line that needed no change is written back byte for byte:
+    piv's cmdline.txt has no trailing newline today, and a tool that silently adds one is a tool
+    whose "nothing changed" cannot be trusted.
+    """
+    trailing = ""
+    body = text
+    while body and body[-1] in " \t\r\n":
+        trailing = body[-1] + trailing
+        body = body[:-1]
+    if not body.strip():
+        return [], trailing
+    try:
+        tokens = shlex.split(body)
+    except ValueError as e:
+        raise ValueError(f"cannot parse the command line: {e}")
+    return tokens, trailing
+
+
+def join_line(tokens, trailing="\n"):
+    for t in tokens:
+        if not t or any(c.isspace() or c in "\"'" for c in t):
+            raise ValueError(f"{t!r} is not an argument this tool will write")
+    return " ".join(tokens) + trailing
+
+
+def tuning_keys(env):
+    """The argument keys the audio profile owns, derived from AUDIO_TUNING_ARGS itself."""
+    keys = []
+    for word in env.get("AUDIO_TUNING_ARGS", "").split():
+        key = word.split("=", 1)[0].strip()
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def is_tuning(token, keys):
+    return any(token == k or token.startswith(k + "=") for k in keys)
+
+
+def retune(tokens, env):
+    """The same command line with the audio profile's arguments replaced by device.env's.
+
+    Every tuning argument already on the line goes, wherever it sits — the change this exists for
+    is `isolcpus=managed_irq,domain,2-3` becoming `...,1-3`, and a plain append would leave both —
+    and the tuned set is put where the first of them was. If the line had none, it is appended,
+    which is where arm-try-piv.sh puts it too.
+    """
+    keys = tuning_keys(env)
+    want = " ".join(env.get("AUDIO_TUNING_ARGS", "").split())
+    if not keys or not want:
+        raise ValueError("AUDIO_TUNING_ARGS is empty: refusing to write a command line with no "
+                         "tuning in it")
+
+    kept, first = [], None
+    for token in tokens:
+        if is_tuning(token, keys):
+            if first is None:
+                first = len(kept)
+            continue
+        kept.append(token)
+    if first is None:
+        first = len(kept)
+
+    out = []
+    for i, token in enumerate(kept):
+        if i == first:
+            out.extend(want.split())
+        out.append(token)
+    if first == len(kept):
+        out.extend(want.split())
+    return out
+
+
+def required_arguments(env):
+    """What a written line must carry: device.env's safety set, plus the two that are never
+    optional. Checked against the line about to be written, not against the intent."""
+    required = env.get("DRACUT_SAFETY_ARGS", "").split() + env.get("PANIC_ARGS", "").split()
+    return required
+
+
+def roots_in(tokens):
+    return [m.group(1) for t in tokens for m in [ROOT_RE.match(t)] if m]
+
+
+def check_line(tokens, env, was=None):
+    """Refuse a command line that would cost the board its remote access. Raises ValueError."""
+    missing = [w for w in required_arguments(env) if w not in tokens]
+    for key in SAFETY_BASE:
+        if not any(t.startswith(key) for t in tokens):
+            missing.append(f"{key}<value>")
+    if missing:
+        raise ValueError("the resulting command line would lose the safety arguments "
+                         f"{' '.join(missing)}: refusing to write it (piv would hang in the "
+                         "initramfs, where only a serial console reaches it)")
+
+    roots = roots_in(tokens)
+    if not roots:
+        raise ValueError("the resulting command line has no root=: refusing to write it")
+    if len(set(roots)) != 1:
+        raise ValueError(f"the resulting command line names more than one root ({roots}): "
+                         "refusing to write it")
+    if was is not None:
+        old = roots_in(was)
+        if len(set(old)) != 1:
+            raise ValueError(f"{' '.join(old) or 'no root='} on the command line being replaced: "
+                             "refusing to write over a line whose root this tool cannot read")
+        if old[0] != roots[0]:
+            raise ValueError(f"the root selector would change: root={old[0]} becomes "
+                             f"root={roots[0]}: refusing to write it")
+
+
+def diff_words(before, after):
+    """A readable +/- of two command lines, by word."""
+    out = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, before, after).get_opcodes():
+        if op == "equal":
+            continue
+        out += [f"-{w}" for w in before[i1:i2]] + [f"+{w}" for w in after[j1:j2]]
+    return " ".join(out)
+
+
+# ------------------------------------------------------------------ the card
+
+def boot_dir(env):
+    """piv's boot partition, where cmdline.txt is (BOOT_MOUNT in device.env)."""
+    return env.get("BOOT_MOUNT") or "/boot/firmware"
+
+
+def cmdline_path(env, path=None):
+    return path or os.path.join(p(boot_dir(env)), "cmdline.txt")
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read()
+    except FileNotFoundError:
+        return default
+
+
+def write_new(path, text):
+    """Write beside the file, fsync, rename. The rename is atomic, so a power cut leaves the old
+    line or the new one and never half of either."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    sync_dir(os.path.dirname(path) or ".")
+
+
+def sync_dir(d):
+    try:
+        fd = os.open(d, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def backups(path):
+    """The backups of one command line, newest last: <name>.bak-<UTC stamp> sorts by time."""
+    return sorted(glob.glob(path + ".bak-*"))
+
+
+def keep_backups(path, keep=KEEP_BACKUPS):
+    """Prune the oldest backups. Returns the ones removed."""
+    have = backups(path)
+    removed = have[:-keep] if keep else list(have)
+    for f in removed:
+        os.remove(f)
+    return removed
+
+
+def back_up(path, text):
+    """Keep the line being replaced, and only ever one file per write.
+
+    Two writes inside the same second get distinct names (the `-2` suffix) rather than one over
+    the other, so `--restore` cannot be left holding the line it was meant to undo. How many are
+    kept is `keep_backups`' business, not this function's: a line that was on the card before and
+    is back again later is a line that was replaced twice, and both times are worth keeping.
+    """
+    dest = path + ".bak-" + stamp()
+    n = 1
+    while os.path.exists(dest):
+        n += 1
+        dest = f"{path}.bak-{stamp()}-{n}"
+    write_new(dest, text)
+    keep_backups(path)
+    return dest
+
+
+def mount_boot(env):
+    """The boot partition is a mount on these boards: say so when it is not, rather than write a
+    line into a bare mount point that the firmware will never read."""
+    where = p(boot_dir(env))
+    if os.environ.get("PIVBOOT_NO_MOUNT") == "1" or os.path.ismount(where):
+        return
+    if not os.path.exists(where) or subprocess.run(["mountpoint", "-q", where]).returncode:
+        die(f"{where} is not a mount point: mount the boot partition first")
+
+
+def reboot(env):
+    cmd = os.environ.get("PIVBOOT_REBOOT")
+    if cmd:
+        subprocess.run([cmd], check=True)
+        return
+    log("rebooting")
+    os.execvp("systemctl", ["systemctl", "reboot"])
+
+
+# ------------------------------------------------------------------ commands
+
+def current_line(env, args):
+    """(path, text on the card) or a refusal: a missing or empty file means this is not piv."""
+    path = cmdline_path(env, args.file)
+    have = read(path)
+    if not have.strip():
+        die(f"{path} is missing or empty: this is not a piv boot tree")
+    return path, have
+
+
+def proposal(env, have):
+    """(tokens on the card, their trailing whitespace, the proposed tokens). Raises ValueError on
+    a line this tool will not write, which is the caller's to report."""
+    tokens, trailing = lines_of(have)
+    want = retune(tokens, env)
+    check_line(want, env, was=tokens)
+    return tokens, trailing, want
+
+
+def cmd_status(env, args):
+    """Read-only, and it stays readable when the card is in a state this tool would refuse to
+    write: the refusal is printed as the change rather than raised."""
+    path, have = current_line(env, args)
+    tokens, _ = lines_of(have)
+    try:
+        tokens, _trailing, want = proposal(env, have)
+        difference = diff_words(tokens, want) or "nothing: the card already says what device.env says"
+        proposed = " ".join(want)
+    except ValueError as e:
+        difference, proposed = f"refused — {e}", "(none: this line will not be written)"
+
+    running, _ = lines_of(read(p("/proc/cmdline")))
+    keys = tuning_keys(env)
+    on_card = " ".join(t for t in tokens if is_tuning(t, keys))
+    in_force = " ".join(t for t in running if is_tuning(t, keys))
+
+    print(f"kernel     {os.uname().release}")
+    print(f"device     {args.env or p('/etc/rtpi/device.env')}")
+    print(f"cmdline    {path}")
+    print(f"running    {in_force or 'no tuning arguments'}"
+          + ("" if in_force == on_card else
+             "   (a reboot applies the card's line)" if on_card else "   (the card has none)"))
+    print(f"on card    {on_card or 'no tuning arguments'}")
+    print(f"proposed   {proposed}")
+    print(f"change     {difference}")
+    for f in backups(path):
+        print(f"backup     {os.path.basename(f)}")
+    if not backups(path):
+        print("restore    (nothing backed up yet)")
+
+
+def cmd_set_args(env, args):
+    if args.yes and args.dry_run:
+        die("--yes and --dry-run contradict each other")
+    path, have = current_line(env, args)
+    # --restore is a way out of a line this tool will not write, so it is decided before the
+    # proposal is checked: the backup is checked on its own terms instead.
+    if args.restore:
+        return cmd_restore(env, args, path, have)
+    try:
+        tokens, trailing, want = proposal(env, have)
+    except ValueError as e:
+        die(str(e))
+
+    difference = diff_words(tokens, want)
+    if not difference:
+        log(f"{path} already says what device.env says: nothing written, no backup")
+        return
+    log(f"{path}: {difference}")
+    if args.dry_run or not args.yes:
+        log("nothing written: --yes rewrites the command line, then reboot")
+        return
+
+    try:
+        new = join_line(want, trailing)
+    except ValueError as e:
+        die(str(e))
+    backup = back_up(path, have)
+    write_new(path, new)
+    # Read it back: a boot-critical file, and a write that did not land is the one failure that
+    # would be discovered by a board that does not come up.
+    read_back = read(path)
+    if read_back != new:
+        die(f"{path} did not read back what was written: it is now {read_back!r}")
+    mount_boot(env)
+    subprocess.run(["sync"])
+    log(f"written; the line it replaced is {os.path.basename(backup)}")
+    if args.reboot:
+        reboot(env)
+    else:
+        log("reboot to pick it up; `piv-boot set-args --restore` puts the old line back")
+
+
+def cmd_restore(env, args, path, have):
+    """Put the newest backup back.
+
+    The backup is checked like anything else that is about to be written, and its root selector
+    has to be the one on the card now: a stale backup is refused rather than written, because
+    restoring an old root is not a boot-argument change. --root overrides that, deliberately and
+    in writing. Running it twice is quiet the second time, and never adds a backup of its own.
+    """
+    have_backups = backups(path)
+    if not have_backups:
+        die(f"{os.path.basename(path)} has no backup beside it: nothing to restore")
+    newest = have_backups[-1]
+    name = os.path.basename(newest)
+    old = read(newest)
+    try:
+        tokens, _trailing = lines_of(have)
+        old_tokens, old_trailing = lines_of(old)
+    except ValueError as e:
+        die(f"{name}: {e}")
+    if len(set(roots_in(old_tokens))) != 1:
+        die(f"{name} does not name exactly one root ({roots_in(old_tokens) or 'none'}): refusing "
+            "to write it")
+    # Check the backup itself first -- safety arguments present, one root -- and then the root
+    # selector separately, because --root is the one way past that check and it has to be said in
+    # as many words.
+    try:
+        check_line(old_tokens, env)
+    except ValueError as e:
+        die(f"{name}: {e}")
+    if roots_in(old_tokens) != roots_in(tokens):
+        if not args.root:
+            die(f"{name} names root={roots_in(old_tokens)[0]} and the card now names "
+                f"root={roots_in(tokens)[0]}: refusing to change the root selector. If that is "
+                f"what you mean, run it again with --root {roots_in(old_tokens)[0]}.")
+        if args.root != roots_in(old_tokens)[0]:
+            die(f"--root {args.root} is not what {name} holds (root={roots_in(old_tokens)[0]}): "
+                "with --restore, --root repeats the selector the backup itself names")
+    if old == have:
+        log(f"{path} is already what {name} holds: nothing written")
+        return
+    log(f"{path}: {diff_words(tokens, old_tokens) or 'the same arguments, different whitespace'}")
+    if args.dry_run:
+        log(f"nothing written: `piv-boot set-args --restore` puts {name} back")
+        return
+    try:
+        new = join_line(old_tokens, old_trailing)
+    except ValueError as e:
+        die(str(e))
+    # No backup of the line being restored over, deliberately: the backup is the undo, and copying
+    # the current line on top of it would make the next --restore undo the restore. The file this
+    # replaces is still in the newest backups from whichever run wrote it.
+    write_new(path, new)
+    if read(path) != new:
+        die(f"{path} did not read back what was written")
+    mount_boot(env)
+    subprocess.run(["sync"])
+    log(f"restored {name}")
+    if args.reboot:
+        reboot(env)
+    else:
+        log("reboot to pick it up")
+
+
+# ------------------------------------------------------------------ main
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="piv-boot", description=__doc__.split("\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--env", help="device.env to read (default /etc/rtpi/device.env)")
+    ap.add_argument("--file", help="the command line to rewrite (default <BOOT_MOUNT>/cmdline.txt)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status")
+    s = sub.add_parser("set-args")
+    s.add_argument("--yes", action="store_true", help="write it (nothing is written without this)")
+    s.add_argument("--dry-run", action="store_true", help="show the change and stop")
+    s.add_argument("--restore", action="store_true", help="put the newest backup back")
+    s.add_argument("--reboot", action="store_true", help="reboot after writing, which applies it")
+    s.add_argument("--root", help="allow --restore to move the root selector to this value")
+    args = ap.parse_args(argv)
+
+    env = read_env(args.env)
+
+    if args.cmd != "status" and os.geteuid() != 0 and not PREFIX:
+        os.execvp("sudo", ["sudo", sys.argv[0]] + (argv if argv is not None else sys.argv[1:]))
+
+    os.makedirs(p("/run"), exist_ok=True)
+    lock = open(p("/run/piv-boot.lock"), "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        {"status": cmd_status, "set-args": cmd_set_args}[args.cmd](env, args)
+    finally:
+        subprocess.run(["sync"])
+
+
+if __name__ == "__main__":
+    main()

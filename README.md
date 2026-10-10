@@ -84,20 +84,46 @@ that separates two module sets, which is why trials get their own suffix
 
 ### Changing the boot arguments on a board that is already up
 
-`AUDIO_TUNING_ARGS` reaches a boot tree only when the tree is built (`init-pedal-boot`, from the
-image build). For a board that is already running, `vip-boot set-args` rewrites every slot's
-`cmdline-tuned.txt` from `devices/vip/device.env` in one pass and keeps what it replaced:
+`AUDIO_TUNING_ARGS` reaches a boot tree only when the tree is built (`init-pedal-boot` on vip,
+`flash-kernel` + `arm-try-piv.sh` on piv). Both boards have a smaller way to move a board that is
+already running onto the arguments in `device.env`, with no kernel staged and no slot promoted:
 
 ```bash
-ssh vip sudo vip-boot set-args            # print the diff; writes nothing
-ssh vip sudo vip-boot set-args --yes      # write it, then reboot
-ssh vip sudo vip-boot set-args --restore  # from any root: put the previous line back
+ssh vip sudo vip-boot set-args            # every slot's cmdline-tuned.txt, in one pass
+ssh piv sudo piv-boot set-args            # piv's one /boot/firmware/cmdline.txt
+
+# both: print the diff and the proposed line, and write nothing
+ssh vip sudo vip-boot set-args
+ssh piv sudo piv-boot set-args
+# write it (the file it replaces is kept beside it), then reboot when you choose
+ssh vip sudo vip-boot set-args --yes
+ssh piv sudo piv-boot set-args --yes
+# put the previous line back
+ssh vip sudo vip-boot set-args --restore
+ssh piv sudo piv-boot set-args --restore
 ```
 
-It stages no kernel and promotes no slot, so the recovery ladder below is unchanged, and both
-slots move together — a fallback that boots the old arguments is a boot into a layout the pedal's
-rules no longer describe. `make vip-try` / `vip-boot try-kernel` remain the heavier route, which is
-what a *new kernel* needs.
+On vip both slots move together, because a fallback that boots the old arguments is a boot into a
+layout the pedal's rules no longer describe. On piv there is one command line in one partition
+(`BOOT_MOUNT` in `devices/piv/device.env`), so `piv-boot` rewrites that file, keeps what it
+replaced as `cmdline.txt.bak-<UTC stamp>`, and `--restore` puts the newest one back.
+
+`piv-boot` only ever moves the arguments the audio profile owns; everything else on the line stays
+as it was. It refuses to write a line that would lose `rd.shell=` / `rd.emergency=` / `rd.retry=` /
+`rd.timeout=` / `panic=` or that would not carry the same `root=` it replaced, and it reads the
+line it wrote back before it reports success. Running it twice does nothing the second time.
+Off the board, `tests/piv-boot/` checks all of that against a fake boot partition.
+
+`make vip-try` / `vip-boot try-kernel`, and `make piv-audio-boot-args`, remain the heavier route,
+which is what a *new kernel* needs.
+
+### The boot half of piv's audio profile
+
+The boot half can be applied two ways. Through the tryboot one-shot
+(`make piv-audio-boot-args`), which stages the running kernel as a candidate and lets the
+firmware's A/B ladder roll it back — the right hammer for a new kernel or for the first
+application of a profile; or, on a board that is already up, through `piv-boot set-args` above,
+which rewrites the one command line and can put it back.
 
 ### Testing
 
