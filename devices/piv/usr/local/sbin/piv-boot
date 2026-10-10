@@ -4,6 +4,8 @@
     piv-boot status                     what is on the card, what is running, what would change
     piv-boot set-args                   show the proposed line and the difference; writes nothing
     piv-boot set-args --yes             rewrite the active command line, keeping the old one
+    piv-boot set-args --yes --write-active-line
+                                        ... for a line whose tuning this boot has not run
     piv-boot set-args --restore         put the newest backup back
 
 WHICH FILE THAT IS. piv's boot partition is Ubuntu's A/B layout, and `config.txt` chooses the boot
@@ -27,10 +29,11 @@ deliberately do not go into `current/cmdline.txt`.
 `piv-boot set-args` is the other thing: it edits the ACTIVE command line (the `current/` tree) in
 place, so there is no candidate and no automatic fallback — if the line it writes does not boot,
 the board needs a serial console, a card reader or the recovery steps in README.md. That is why
-the project deliberately avoids it for an untested change, and why `set-args` says so in its
-output. It exists for the case the tryboot route does not fit: a board that is already up, a
-change small enough to be sure of, and a card with no candidate. No new gate was added: what
-`--yes` means is unchanged.
+the project deliberately avoids it for an untested change, and why `set-args` now says so twice:
+once in its output, and once by refusing. A line whose tuning arguments are not the ones
+`/proc/cmdline` is running has not been booted by this board, so `--yes` alone will not write it;
+`--write-active-line` is how you say you mean it anyway, and it is the only thing that flag
+changes. `--yes` still means what it meant.
 
 vip has had the smaller tool for a while (`vip-boot set-args`, README "Changing the boot arguments
 on a board that is already up"): it rewrites the command lines from `devices/vip/device.env` on the
@@ -56,10 +59,17 @@ rather than as text:
     changed, the write stops;
   * nothing is written without `--yes`; every write is read back and re-parsed; the file it
     replaces is kept beside it as `cmdline.txt.bak-<UTC stamp>`, and only the newest three are
-    kept. A second run with nothing to change writes nothing and adds no backup. `--restore` is
-    the exception on purpose: it is the way out of a line that will not boot, so it writes without
-    being asked twice (`--dry-run` still shows it first, the backup it would restore is checked
-    exactly like a new line, and it makes no backup of its own — so it can be run again).
+    kept. A second run with nothing to change writes nothing and adds no backup;
+  * a write of a line this boot has not run is its own act: when the tuning arguments about to be
+    written are not the ones `/proc/cmdline` is running, `--yes` is not enough and
+    `--write-active-line` says in as many words that the line is meant anyway. A `/proc/cmdline`
+    that cannot be read is the absence of that proof, not an empty line, so it takes the flag too
+    (and the refusal names the file). `--restore` is held to the same rule, and only when the line
+    it would put back is not the one running now;
+  * `--restore` is the exception on purpose: it is the way out of a line that will not boot, so it
+    writes without being asked twice (`--dry-run` still shows it first, the backup it would
+    restore is checked exactly like a new line, and it makes no backup of its own — so it can be
+    run again).
 
 This tool does not stage a kernel and does not touch the firmware's one-shot flag: it edits the
 tree `os_prefix` selects for a normal boot (`current/`) where it lies, and the way back is
@@ -69,8 +79,9 @@ whether it becomes `current/`.
 
 IT DOES NOT REBOOT OR WRITE ANYTHING UNLESS ASKED
 
-`set-args` prints and stops. `--yes` writes; `--yes --reboot` also reboots, which is the one thing
-that applies the change.
+`set-args` prints and stops. `--yes` writes, and a line whose tuning arguments are not the ones
+this boot is running takes `--write-active-line` as well; `--yes --reboot` also reboots, which is
+the one thing that applies the change.
 
 Paths are overridable for the tests: PIVBOOT_PREFIX is put in front of every absolute path,
 PIVBOOT_NO_MOUNT=1 skips the mount check, PIVBOOT_REBOOT names a command run instead of systemctl
@@ -269,6 +280,81 @@ def diff_words(before, after):
             continue
         out += [f"-{w}" for w in before[i1:i2]] + [f"+{w}" for w in after[j1:j2]]
     return " ".join(out)
+
+
+# ------------------------------------------------------------------ the line that is running
+
+def tuning_of(tokens, env):
+    """The tuning arguments on one command line, in the order they appear."""
+    keys = tuning_keys(env)
+    return [t for t in tokens if is_tuning(t, keys)]
+
+
+def running_tuning(env):
+    """(the tuning arguments this boot is running, where that was read) — tokens None when it
+    cannot be read, with the reason in place of the path.
+
+    /proc/cmdline is the only evidence on the board that a command line has been booted, and it is
+    the whole of what this gate is about: a line whose tuning arguments are the ones running now
+    has been booted, so putting them on the card changes nothing about isolation. A file that
+    cannot be read is NOT the same thing as a line with no tuning arguments — read that way, a
+    proposal would compare equal to it and the gate would open on exactly the board whose evidence
+    is missing — it is the absence of proof, and the caller has to ask a second time.
+    """
+    path = p("/proc/cmdline")
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError as e:
+        return None, f"{path} cannot be read ({e.strerror or e})"
+    if not text.strip():
+        return None, f"{path} is empty"
+    try:
+        tokens, _ = lines_of(text)
+    except ValueError as e:
+        return None, f"{path} cannot be parsed ({e})"
+    return tuning_of(tokens, env), path
+
+
+def untried_line(env, proposed):
+    """None when `proposed` only says what this boot is already running, or why writing it is an
+    untried change: (the reason, the running arguments or None, the proposed ones).
+
+    Only the tuning keys device.env's AUDIO_TUNING_ARGS names are compared, because those are the
+    arguments this tool may move at all, and what the gate protects is isolation: a line that puts
+    the kernel on cores nothing has run it on. Two flags of that set written in one order or the
+    other are not a difference the kernel can see, so the sets are compared, not the lines.
+    """
+    running, source = running_tuning(env)
+    proposed_tuning = tuning_of(proposed, env)
+    if running is None:
+        return source, None, proposed_tuning
+    if sorted(running) == sorted(proposed_tuning):
+        return None
+    return ("its tuning arguments are not the ones this boot is running",
+            running, proposed_tuning)
+
+
+def refuse_untried_line(asked, reason, running, proposed):
+    """Refuse, and say the whole of it: what is being asked for, what it would do, and the two
+    ways on. This is an act, so the message is all the caller gets — nothing was written."""
+    # Two different things, said as two different things: a tuning this board has not run, and a
+    # board whose /proc/cmdline is not there to say either way.
+    head = "has not booted" if running is not None else "cannot be shown to have booted"
+    log(f"{asked} would write a command line this board {head}: {reason}")
+    if running is not None:
+        log(f"running    {' '.join(running) or 'no tuning arguments'}")
+    log(f"proposed   {' '.join(proposed) or 'no tuning arguments'}")
+    log("the active line is the one the firmware reads on the NEXT boot -- the tree os_prefix "
+        "names, rewritten in place -- so there is no candidate behind it and no automatic "
+        "fallback: a line that does not come up costs a serial console or a card reader "
+        "(README, RECOVERY)")
+    log("`make piv-audio-boot-args` (scripts/safety/arm-try-piv.sh --audio-tuning) stages the same "
+        "change in new/ and leaves current/ bootable, so a line that does not come up falls back "
+        "by itself")
+    log(f"`--write-active-line` is how you say you mean it anyway: `piv-boot set-args {asked} "
+        "--write-active-line`")
+    sys.exit(1)
 
 
 # ------------------------------------------------------------------ the card
@@ -526,9 +612,16 @@ def cmd_set_args(env, args):
     warn_about_the_route()
     log(f"cmdline    {path} (the file the firmware reads, and the file that would be written)")
     log(f"{path}: {difference}")
+    # The gate is about the act of writing, so it is asked here and not in the preview: --dry-run
+    # and a bare set-args write nothing and keep working without the flag.
+    untried = None if args.write_active_line else untried_line(env, want)
     if args.dry_run or not args.yes:
+        if untried:
+            log(f"writing this line also takes --write-active-line: {untried[0]}")
         log("nothing written: --yes rewrites the command line, then reboot")
         return
+    if untried:
+        refuse_untried_line("--yes", *untried)
 
     try:
         new = join_line(want, trailing)
@@ -592,9 +685,17 @@ def cmd_restore(env, args, path, have):
         return
     warn_about_the_route()
     log(f"{path}: {diff_words(tokens, old_tokens) or 'the same arguments, different whitespace'}")
+    # The same rule as a new line: restoring a line whose tuning this boot is not running is
+    # writing a line nobody has booted. A backup that IS the running line -- the usual undo of a
+    # write that just happened -- is not gated, so the way out of a bad line stays open.
+    untried = None if args.write_active_line else untried_line(env, old_tokens)
     if args.dry_run:
+        if untried:
+            log(f"restoring this line also takes --write-active-line: {untried[0]}")
         log(f"nothing written: `piv-boot set-args --restore` puts {name} back")
         return
+    if untried:
+        refuse_untried_line("--restore", *untried)
     try:
         new = join_line(old_tokens, old_trailing)
     except ValueError as e:
@@ -628,6 +729,9 @@ def main(argv=None):
     s = sub.add_parser("set-args")
     s.add_argument("--yes", action="store_true", help="write it (nothing is written without this)")
     s.add_argument("--dry-run", action="store_true", help="show the change and stop")
+    s.add_argument("--write-active-line", action="store_true",
+                   help="write a line whose tuning arguments are not the ones running now; "
+                        "--yes alone refuses it, because that line has not been booted")
     s.add_argument("--restore", action="store_true", help="put the newest backup back")
     s.add_argument("--reboot", action="store_true", help="reboot after writing, which applies it")
     s.add_argument("--root", help="allow --restore to move the root selector to this value")

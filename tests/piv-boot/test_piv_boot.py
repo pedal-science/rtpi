@@ -140,6 +140,17 @@ class FakePiv(unittest.TestCase):
         with open(self.card_path(), "w") as f:
             f.write(text)
 
+    def write_card_args(self, *args, **kw):
+        """set-args as an operator who means it.
+
+        Every write whose tuning arguments are not the ones `/proc/cmdline` is running has to
+        carry --write-active-line, and in this fake board that is the ordinary case: the card and
+        the running line carry the old profile while device.env has moved to the new one. The
+        cases that are about the gate itself call run_pb() directly, so that this helper is never
+        standing in for the thing they check.
+        """
+        return self.run_pb("set-args", "--write-active-line", *args, **kw)
+
     def card_path(self):
         """The file the firmware reads: <BOOT_MOUNT>/<os_prefix>cmdline.txt."""
         return f"{self.live}/cmdline.txt"
@@ -190,7 +201,7 @@ class TestStatus(FakePiv):
         self.assertIn("cmdline.txt", r.stdout)
 
     def test_status_says_so_when_the_running_line_already_matches(self):
-        self.run_pb("set-args", "--yes")                 # the card now carries the new profile
+        self.write_card_args("--yes")                    # the card now carries the new profile
         self.boot_as(NEW_TUNING)                         # and this boot is running it
         r = self.run_pb("status")
         self.assertIn("running    isolcpus=managed_irq,domain,1-3", r.stdout)
@@ -226,7 +237,7 @@ class TestReadingDeviceEnv(FakePiv):
         self.assertIn("-isolcpus=managed_irq,domain,2-3", r.stderr)
         self.assertEqual(self.card(), before, "showing the proposal must not write it")
 
-        self.run_pb("set-args", "--yes", env_path=path)
+        self.write_card_args("--yes", env_path=path)
         self.assertIn(other, self.card())
         self.assertNotIn("isolcpus=managed_irq,domain,2-3", self.card())
 
@@ -253,7 +264,7 @@ class TestReadingDeviceEnv(FakePiv):
 class TestRewriting(FakePiv):
     def test_rewrites_the_tuning_and_keeps_every_other_argument(self):
         before = self.card_tokens()
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         after = self.card_tokens()
         keys = pb.tuning_keys(self.env)
         self.assertEqual([t for t in before if not pb.is_tuning(t, keys)],
@@ -268,7 +279,7 @@ class TestRewriting(FakePiv):
     def test_the_tuned_arguments_land_where_the_old_ones_were(self):
         """Appending instead would leave the old profile on the line for one of the two sets of
         keys that disagree, which is the failure this tool exists to prevent."""
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         after = self.card_tokens()
         self.assertNotIn("isolcpus=managed_irq,domain,2-3", after)
         self.assertNotIn("irqaffinity=0-1", after)
@@ -278,7 +289,7 @@ class TestRewriting(FakePiv):
     def test_appends_when_the_card_has_no_tuning_at_all(self):
         with open(self.card_path(), "w") as f:
             f.write(cmdline_text(tuning="").replace("  ", " "))
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         self.assertEqual(self.card_tokens()[-len(NEW_TUNING.split()):], NEW_TUNING.split())
         self.assertIn("rd.emergency=reboot", self.card())
 
@@ -298,10 +309,10 @@ class TestRewriting(FakePiv):
         self.assertEqual(self.backups(), [])
 
     def test_it_does_not_reboot_unless_asked(self):
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         self.assertEqual(self.reboots_seen(), [], "--yes writes; the reboot is a separate act")
         self.run_pb("set-args", "--restore", "--yes")
-        self.run_pb("set-args", "--yes", "--reboot")
+        self.write_card_args("--yes", "--reboot")
         self.assertEqual(self.reboots_seen(), ["called"])
 
     def test_a_missing_cmdline_is_not_a_piv_boot_tree(self):
@@ -316,7 +327,7 @@ class TestRewriting(FakePiv):
         """The write goes to a temporary name and is renamed over the file, so a reader never
         sees half a command line. It happens inside the tree os_prefix names, beside the
         backups, and never in the root of the boot partition."""
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         self.assertEqual(os.listdir(self.live),
                          sorted(["cmdline.txt"] + self.backups()))
         self.assertNotIn("cmdline.txt.tmp", os.listdir(self.live))
@@ -325,12 +336,93 @@ class TestRewriting(FakePiv):
                          "the leftover at the root of the boot partition is never written")
 
     def test_a_line_with_no_trailing_newline_stays_that_way(self):
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         self.assertFalse(self.card().endswith("\n"))
         with open(self.card_path(), "w") as f:
             f.write(cmdline_text(tuning=OLD_TUNING, newline=True))
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         self.assertTrue(self.card().endswith("\n"))
+
+
+class TestWritingALineThisBootHasNotRun(FakePiv):
+    """`--yes` writes a line whose tuning arguments the running kernel already has, and refuses one
+    it has not run: that is the write that moves what the next boot is told, in place, with no
+    candidate behind it.
+
+    The evidence is /proc/cmdline and nothing else, which is what these cases arrange. setUp runs
+    the old profile while device.env has moved to the new one, so plain `--yes` is the refusal here
+    and --write-active-line is the act.
+    """
+
+    def test_refused_without_the_flag_when_the_tuning_differs(self):
+        before = self.card()
+        r = self.run_pb("set-args", "--yes", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.card(), before, "a refusal writes nothing at all")
+        self.assertEqual(self.backups(), [])
+        self.assertEqual(self.reboots_seen(), [])
+
+    def test_the_refusal_says_what_would_happen_and_both_ways_on(self):
+        r = self.run_pb("set-args", "--yes", check=False)
+        said = self.said(r)
+        self.assertIn("--write-active-line", said, "the flag that means it anyway")
+        self.assertIn("make piv-audio-boot-args", said, "and the route with a fallback behind it")
+        self.assertIn("NEXT boot", said, "an active line applies at the next boot, in place")
+        self.assertIn("no candidate", said)
+        self.assertIn(OLD_TUNING, said, "what this boot is running")
+        self.assertIn(NEW_TUNING, said, "and what would be written")
+
+    def test_accepted_with_the_flag(self):
+        self.run_pb("set-args", "--yes", "--write-active-line")
+        self.assertIn(NEW_TUNING, self.card())
+        self.assertEqual(len(self.backups()), 1, "and it is still a normal, backed-up write")
+
+    def test_accepted_without_the_flag_when_the_line_is_the_one_running(self):
+        """The gate is about isolation, not about diffing: this card has lost its tuning while the
+        kernel is running device.env's, so putting it back writes a line this boot has booted and
+        `--yes` alone still does it."""
+        self.boot_as(NEW_TUNING)
+        self.write_card(cmdline_text(tuning="").replace("  ", " "))
+        r = self.run_pb("set-args", "--yes")
+        self.assertIn(NEW_TUNING, self.card())
+        self.assertNotIn("--write-active-line", self.said(r))
+
+    def test_a_running_line_that_cannot_be_read_is_not_a_matching_one(self):
+        """Absence of evidence, not an empty line: the one file that says whether a line has ever
+        been booted is not there, so the write takes the flag -- and the refusal names the file."""
+        os.remove(f"{self.root}/proc/cmdline")
+        before = self.card()
+        r = self.run_pb("set-args", "--yes", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("proc/cmdline", r.stderr)
+        self.assertIn("cannot be read", r.stderr)
+        self.assertIn("--write-active-line", r.stderr)
+        self.assertEqual(self.card(), before)
+        self.run_pb("set-args", "--yes", "--write-active-line")
+        self.assertIn(NEW_TUNING, self.card(), "the flag is a decision, not a dead end")
+
+    def test_an_empty_running_line_is_the_same_absence_of_proof(self):
+        open(f"{self.root}/proc/cmdline", "w").close()
+        before = self.card()
+        r = self.run_pb("set-args", "--yes", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("is empty", r.stderr)
+        self.assertEqual(self.card(), before)
+
+    def test_the_preview_and_the_dry_run_still_work_without_the_flag(self):
+        """--dry-run writes nothing and neither does a bare set-args, so both keep working; both
+        also say which flag a write would take, so the gate is not a surprise at --yes. The flag
+        on its own is not a write either: --write-active-line says which line is meant, and --yes
+        is still what writes."""
+        before = self.card()
+        for args in (("--dry-run",), (), ("--write-active-line",)):
+            r = self.run_pb("set-args", *args)
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("nothing written", r.stderr)
+            if "--write-active-line" not in args:
+                self.assertIn("--write-active-line", r.stderr)
+            self.assertEqual(self.card(), before)
+            self.assertEqual(self.backups(), [])
 
 
 class TestRefusals(FakePiv):
@@ -415,7 +507,7 @@ class TestWhichCommandLineTheFirmwareReads(FakePiv):
         self.assertIn(f"cmdline    {self.live}/cmdline.txt", r.stdout)
 
         before_root = self.read(self.root_cmdline())
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         self.assertIn(NEW_TUNING, self.card())
         self.assertNotIn("isolcpus=managed_irq,domain,2-3", self.card())
         self.assertEqual(os.listdir(self.live), sorted(["cmdline.txt"] + self.backups()),
@@ -430,7 +522,7 @@ class TestWhichCommandLineTheFirmwareReads(FakePiv):
         os.makedirs(f"{self.boot}/new")
         with open(f"{self.boot}/new/cmdline.txt", "w") as f:
             f.write(cmdline_text(tuning="isolcpus=managed_irq,domain=0-3"))
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         self.assertIn(NEW_TUNING, self.card())
         self.assertEqual(sorted(os.listdir(f"{self.boot}/new")), ["cmdline.txt"],
                          "a candidate in new/ is arm-try-piv.sh's to write, not this tool's")
@@ -445,7 +537,7 @@ class TestWhichCommandLineTheFirmwareReads(FakePiv):
             f.write(cmdline_text())
         r = self.run_pb("status")
         self.assertIn(f"cmdline    {self.root_cmdline()}", r.stdout)
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         self.assertIn(NEW_TUNING, self.read(self.root_cmdline()))
         backups = [os.path.basename(b) for b in glob.glob(self.root_cmdline() + ".bak-*")]
         self.assertLessEqual(len(backups), 1)
@@ -479,7 +571,7 @@ class TestWhichCommandLineTheFirmwareReads(FakePiv):
     def test_set_args_says_which_file_before_it_writes_it(self):
         said = self.said(self.run_pb("set-args"))
         self.assertIn(self.live, said)
-        said = self.said(self.run_pb("set-args", "--yes"))
+        said = self.said(self.write_card_args("--yes"))
         self.assertIn(self.live, said)
 
     def test_file_still_overrides_the_resolution(self):
@@ -539,7 +631,7 @@ class TestWhatARefusalSays(FakePiv):
 class TestBackupAndRestore(FakePiv):
     def test_the_replaced_line_is_kept_beside_it_and_restored(self):
         before = self.card()
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         self.assertEqual(len(self.backups()), 1)
         self.assertRegex(self.backups()[0], r"^cmdline\.txt\.bak-\d{8}T\d{6}Z$")
         self.assertEqual(self.read(f"{self.live}/{self.backups()[0]}"), before)
@@ -581,7 +673,7 @@ class TestBackupAndRestore(FakePiv):
         """--restore writes without --yes, because it is the way out of a line that will not boot;
         --dry-run is how you see it first, and it is the only thing that stops it."""
         before = self.card()
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         tuned = self.card()
         r = self.run_pb("set-args", "--restore", "--dry-run")
         self.assertIn("-isolcpus=managed_irq,domain,1-3", r.stderr)
@@ -591,9 +683,47 @@ class TestBackupAndRestore(FakePiv):
         self.assertEqual(self.card(), before, "the backup is back, byte for byte")
 
 
+class TestRestoringALineThisBootHasNotRun(FakePiv):
+    """--restore is held to the same rule, and only when the line it would put back is not the one
+    running now. The ordinary undo -- put back what the last write replaced, which is what this
+    boot is running -- stays one command with no flag, so the way out of a bad line stays open."""
+
+    def backup_of(self, tuning):
+        """A backup holding a given tuning, shaped the way the tool writes them."""
+        path = f"{self.live}/cmdline.txt.bak-20260101T000000Z"
+        with open(path, "w") as f:
+            f.write(cmdline_text(tuning=tuning, newline=True))
+        return path
+
+    def test_the_ordinary_undo_needs_no_flag(self):
+        self.write_card_args("--yes")            # the card moves off the running line...
+        self.run_pb("set-args", "--restore")     # ...and the undo puts it back
+        self.assertIn(OLD_TUNING, self.card())
+
+    def test_a_backup_this_boot_is_not_running_takes_the_flag(self):
+        self.backup_of(NEW_TUNING)
+        before = self.card()
+        r = self.run_pb("set-args", "--restore", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--write-active-line", r.stderr)
+        self.assertIn("make piv-audio-boot-args", r.stderr)
+        self.assertEqual(self.card(), before, "a refused restore writes nothing")
+        self.run_pb("set-args", "--restore", "--write-active-line")
+        self.assertIn(NEW_TUNING, self.card())
+
+    def test_restore_dry_run_shows_it_without_the_flag(self):
+        self.backup_of(NEW_TUNING)
+        before = self.card()
+        r = self.run_pb("set-args", "--restore", "--dry-run")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("nothing written", r.stderr)
+        self.assertIn("--write-active-line", r.stderr)
+        self.assertEqual(self.card(), before)
+
+
 class TestIdempotence(FakePiv):
     def test_running_it_twice_changes_nothing_and_adds_no_backup(self):
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         once, backups = self.card(), list(self.backups())
         mtime = os.path.getmtime(self.card_path())
         r = self.run_pb("set-args", "--yes")
@@ -608,10 +738,10 @@ class TestIdempotence(FakePiv):
     def test_a_second_run_does_not_duplicate_the_tuned_arguments(self):
         """Move the card back to the old profile underneath the tool, as a board that was
         rewritten by hand would be, and check the rewrite is still not additive."""
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         with open(self.card_path(), "w") as f:
             f.write(cmdline_text(tuning=OLD_TUNING + " skew_tick=1"))
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         tokens = self.card_tokens()
         self.assertEqual(tokens.count("skew_tick=1"), 1)
         self.assertEqual(tokens.count("irqaffinity=0"), 1)
@@ -624,8 +754,8 @@ class TestIdempotence(FakePiv):
         for _ in range(4):
             with open(self.card_path(), "w") as f:
                 f.write(cmdline_text(tuning="isolcpus=managed_irq,domain=2-3"))
-            self.run_pb("set-args", "--yes")
-            self.run_pb("set-args", "--restore", "--yes")
+            self.write_card_args("--yes")
+            self.write_card_args("--restore", "--yes")
         self.assertLessEqual(len(self.backups()), pb.KEEP_BACKUPS)
         self.assertGreaterEqual(len(self.backups()), 1)
         self.assertIn("isolcpus=managed_irq,domain=2-3", self.card())
@@ -635,13 +765,13 @@ class TestIdempotence(FakePiv):
         while a profile is worked out. The second run's backup must not land on the first one's,
         or --restore would put back the line it was supposed to undo."""
         old = self.card()
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         tuned = self.card()
         self.assertNotEqual(old, tuned)
         with open(self.card_path(), "w") as f:
             f.write(cmdline_text(tuning="isolcpus=managed_irq,domain=1-2"))
         second = self.card()
-        self.run_pb("set-args", "--yes")                  # a second write, same second
+        self.write_card_args("--yes")                     # a second write, same second
         self.assertEqual(self.card(), tuned)
         kept = [self.read(f"{self.live}/{b}") for b in self.backups()]
         self.assertIn(old, kept, "the line the first write replaced")
@@ -650,7 +780,7 @@ class TestIdempotence(FakePiv):
 
     def test_a_run_with_nothing_to_do_after_a_restore_is_quiet(self):
         before = self.card()
-        self.run_pb("set-args", "--yes")
+        self.write_card_args("--yes")
         self.run_pb("set-args", "--restore")
         r = self.run_pb("set-args", "--restore", "--yes")
         self.assertIn("already what", r.stderr)
