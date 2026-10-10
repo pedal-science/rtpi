@@ -30,6 +30,13 @@ CONFIG_INET_MPTCP_DIAG=m
 # selected by these two and need no line of their own.
 CONFIG_DRM_VC4=m
 CONFIG_DRM_V3D=m
+# i2c-brcmstb, backlight and HDMI CEC — what vc4 needs to finish binding on the Pi 5, found by booting
+# the overlay on numaemu2 (2026-10-10): the HDMI ports' DDC buses are brcmstb-i2c, HDMI waits for its
+# DDC adapter, and the GPU then defers for ever with no display at all. Booting the stock kernel with
+# the overlay and diffing its modules gave the rest; the stock config builds all three the same way.
+CONFIG_I2C_BRCMSTB=m
+CONFIG_BACKLIGHT_CLASS_DEVICE=m
+CONFIG_DRM_VC4_HDMI_CEC=y
 # usbhid, hid-generic, hid-multitouch — the screen's touch digitiser, on USB. Nothing HID is
 # attached to vip today, so these too are absent from /proc/modules until the screen is.
 CONFIG_USB_HID=m
