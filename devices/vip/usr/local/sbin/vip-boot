@@ -5,6 +5,8 @@
     vip-boot try-kernel <release> [--no-reboot]   stage /boot/vmlinuz-<release> in the spare slot, boot it once
     vip-boot try-args '<args>' [--no-reboot]      the running kernel with new tuned arguments, once
     vip-boot set-args [--yes] [--restore]         rewrite every slot's tuned line from device.env
+    vip-boot try-config '<line>' [--no-reboot]    the running kernel with one more config.txt line, once
+    vip-boot drop-config '<line>' [--yes]         take a promoted config line away again
     vip-boot loose [--no-reboot]                  one boot in the loose profile
     vip-boot default tuned|loose                  the pedal's profile from now on
     vip-boot default pedal|rescue                 which root boots from now on
@@ -33,8 +35,15 @@ one-shot tryboot flag ("0 tryboot") selects the [tryboot] sections of the pedal'
 
 The pedal's config.txt is written once and never again. It includes two small files:
 
-    [all]       include profile.txt    os_prefix=<active slot>/ and cmdline=cmdline-<profile>.txt
+    [all]       include profile.txt    os_prefix=<active slot>/ and cmdline=cmdline-<profile>.txt,
+                                       then the active slot's own config lines
     [tryboot]   include tryboot.txt    whatever the next one-shot should change
+
+A slot's own config lines (its config.lines: a dtoverlay=, say) are how a board that is already up
+gets a config.txt line without a card write: `try-config` copies the active slot to the spare with the
+line added and arms it for one boot like a kernel, and validation promotes it, writing the line into
+profile.txt. A trial can only add a line (the active slot's lines are in force on the trial boot too,
+through profile.txt), so taking one away is `drop-config`, which rewrites profile.txt directly.
 
 Kernels live in two fixed slots, a/ and b/. profile.txt names the active one; the other holds the
 previous kernel, or a candidate while one is tried. A card can also be written with both slots
@@ -156,12 +165,38 @@ def reason_text(reason):
     return padded(reason, REASON_W, comment=None)
 
 
-def profile_text(slot, profile):
-    return padded(f"os_prefix={slot}/\ncmdline=cmdline-{profile}.txt\n", SMALL)
+def profile_text(slot, profile, lines=()):
+    text = f"os_prefix={slot}/\ncmdline=cmdline-{profile}.txt\n" + "".join(l + "\n" for l in lines)
+    try:
+        return padded(text, SMALL)
+    except ValueError:
+        die(f"slot {slot}'s config lines don't fit in profile.txt ({SMALL} bytes): {' | '.join(lines)}")
 
 
 def tryboot_text(line=None):
-    return padded((line + "\n") if line else "# nothing armed\n", SMALL)
+    try:
+        return padded((line + "\n") if line else "# nothing armed\n", SMALL)
+    except ValueError:
+        die(f"the one-shot doesn't fit in tryboot.txt ({SMALL} bytes): {line!r}")
+
+
+# Keys a config line may not set: vip-boot owns them (the slot, the command line, the kernel and its
+# initramfs, the boot partition), and an include or a section header would change what the rest of
+# config.txt means.
+OWNED_KEYS = ("os_prefix", "cmdline", "kernel", "initramfs", "include", "boot_partition", "tryboot_a_b")
+
+
+def check_config_line(line):
+    """One config.txt line a slot may carry, or die saying why not."""
+    line = line.strip()
+    if not line or "\n" in line or line.startswith("#"):
+        die(f"a config line is one non-empty, non-comment line: {line!r}")
+    if line.startswith("["):
+        die(f"{line!r} is a section header: it would change what follows it in config.txt")
+    key = line.replace("=", " ").split()[0]
+    if key in OWNED_KEYS:
+        die(f"{key} is vip-boot's to set, not a slot's: {line!r}")
+    return line
 
 
 def state_text(state):
@@ -290,8 +325,18 @@ class Board:
         return parse_profile(read(os.path.join(self.pedal_boot, "profile.txt")))
 
     def set_profile(self, slot, profile):
+        """The default from now on: this slot, this profile, and the slot's own config lines."""
         assert slot in self.slots and profile in PROFILES
-        write_in_place(os.path.join(self.pedal_boot, "profile.txt"), profile_text(slot, profile))
+        write_in_place(os.path.join(self.pedal_boot, "profile.txt"),
+                       profile_text(slot, profile, self.config_lines(slot)))
+
+    def config_lines(self, slot):
+        """The config.txt lines a slot boots with beyond config.txt's own (none on an older card)."""
+        text = read(os.path.join(self.slot_dir(slot), "config.lines"))
+        return [l.strip() for l in text.splitlines() if l.strip() and not l.startswith("#")]
+
+    def set_config_lines(self, slot, lines):
+        write_new(os.path.join(self.slot_dir(slot), "config.lines"), "".join(l + "\n" for l in lines))
 
     def arm(self, line):
         write_in_place(os.path.join(self.pedal_boot, "tryboot.txt"), tryboot_text(line))
@@ -498,6 +543,8 @@ def cmd_status(board, _args):
     for s in board.slots:
         mark = "*" if s == active else " "
         print(f"slot {s} {mark}   {board.state(s):8} {board.release(s) or '-'}  {read(os.path.join(board.slot_dir(s), 'tuned.args')).strip()}")
+        for line in board.config_lines(s):
+            print(f"             config  {line}")
     armed = [l for l in read(os.path.join(board.pedal_boot, "tryboot.txt")).splitlines()
              if l and not l.startswith("#")]
     print(f"one-shot   {' '.join(armed) or 'nothing armed'} (applies only when rebooted with the tryboot flag)")
@@ -511,17 +558,28 @@ def need_pedal(board):
         die(f"this runs on the pedal root; this is {board.root}")
 
 
-def try_candidate(board, args, release, tuned_args, from_active):
+def try_candidate(board, args, release, tuned_args, from_active, add_lines=()):
+    """Stage the spare slot and arm it for one boot. The candidate keeps the active slot's config
+    lines, so promoting a kernel never drops a line an earlier trial promoted; add_lines are the
+    ones being tried, which only the one-shot carries until validation makes them the default."""
     board.need_pedal_boot()
     if board.tryboot:
         die("this boot is itself a tryboot: reboot normally first")
     active, spare = board.spare()
     if board.state(active) != "good":
         die(f"the active slot {active} is {board.state(active)}, not good: refusing to try anything")
+    keep = board.config_lines(active)
+    lines = keep + [l for l in add_lines if l not in keep]
+    # Both files are fixed-length: check they'll hold the lines before anything is staged.
+    one_shot = "\n".join([f"os_prefix={spare}/"] + lines[len(keep):])
+    tryboot_text(one_shot)
+    profile_text(spare, PROFILES[0], lines)
     fill_slot(board, spare, release, tuned_args, from_slot=active if from_active else None)
+    board.set_config_lines(spare, lines)
     board.set_state(spare, "trying")
-    board.arm(f"os_prefix={spare}/")
-    log(f"slot {spare}: {release}, armed for one boot; validation promotes it, anything else returns to {active}")
+    board.arm(one_shot)
+    what = release + "".join(f" + {l}" for l in lines[len(keep):])
+    log(f"slot {spare}: {what}, armed for one boot; validation promotes it, anything else returns to {active}")
     if not args.no_reboot:
         board.reboot("0 tryboot")
 
@@ -536,6 +594,37 @@ def cmd_try_args(board, args):
     board.need_pedal_boot()
     active, _ = board.spare()
     try_candidate(board, args, board.release(active), " ".join(args.args.split()), from_active=True)
+
+
+def cmd_try_config(board, args):
+    need_pedal(board)
+    board.need_pedal_boot()
+    line = check_config_line(args.line)
+    active, _ = board.spare()
+    if line in board.config_lines(active):
+        die(f"slot {active} already boots with {line!r}")
+    try_candidate(board, args, board.release(active), read(os.path.join(board.slot_dir(active), "tuned.args")).strip(),
+                  from_active=True, add_lines=[line])
+
+
+def cmd_drop_config(board, args):
+    """A promoted line taken away. No trial can do this (profile.txt carries the active slot's lines
+    into every boot, the trial's too), so it is the one direct rewrite: profile.txt without the
+    line, and the active slot's record to match. The boot it returns to is the one before the line
+    was promoted. Nothing is written without --yes."""
+    need_pedal(board)
+    board.need_pedal_boot()
+    active, profile = board.profile()
+    line = args.line.strip()
+    lines = board.config_lines(active)
+    if line not in lines:
+        die(f"slot {active} doesn't boot with {line!r}; it has: {' | '.join(lines) or 'no config lines'}")
+    if not args.yes:
+        die(f"nothing written: --yes takes {line!r} out of slot {active} and profile.txt, then reboot")
+    board.set_config_lines(active, [l for l in lines if l != line])
+    board.set_profile(active, profile)
+    subprocess.run(["sync"])
+    log(f"slot {active}: {line!r} dropped; reboot to boot without it")
 
 
 def args_word_diff(have, new):
@@ -892,6 +981,8 @@ def main(argv=None):
     s = sub.add_parser("try-kernel"); s.add_argument("release"); s.add_argument("--no-reboot", action="store_true")
     s = sub.add_parser("try-args"); s.add_argument("args"); s.add_argument("--no-reboot", action="store_true")
     s = sub.add_parser("set-args"); s.add_argument("--yes", action="store_true"); s.add_argument("--restore", action="store_true"); s.add_argument("--reboot", action="store_true")
+    s = sub.add_parser("try-config"); s.add_argument("line"); s.add_argument("--no-reboot", action="store_true")
+    s = sub.add_parser("drop-config"); s.add_argument("line"); s.add_argument("--yes", action="store_true")
     s = sub.add_parser("loose"); s.add_argument("--no-reboot", action="store_true")
     s = sub.add_parser("default"); s.add_argument("what", choices=PROFILES + ("pedal", "rescue"))
     s = sub.add_parser("rescue"); s.add_argument("--stay", action="store_true"); s.add_argument("--no-reboot", action="store_true")
@@ -932,7 +1023,7 @@ def main(argv=None):
     board = Board(env)
     try:
         {"status": cmd_status, "try-kernel": cmd_try_kernel, "try-args": cmd_try_args,
-         "set-args": cmd_set_args,
+         "set-args": cmd_set_args, "try-config": cmd_try_config, "drop-config": cmd_drop_config,
          "loose": cmd_loose, "default": cmd_default, "rescue": cmd_rescue, "stay": cmd_stay, "try-pedal": cmd_try_pedal,
          "settle": cmd_settle, "validate": cmd_validate,
          "guard-clear": cmd_guard_clear, "deadline": cmd_deadline}[args.cmd](board, args)

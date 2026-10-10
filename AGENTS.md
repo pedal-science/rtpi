@@ -29,7 +29,10 @@ make test-piv              # latency and xrun suite; results go to results/
   audio card and the UART work on these boards.
 - **vip** (Raspberry Pi 5, the pedal's Core host) is built from an image, not upgraded with apt:
   no flash-kernel, no piboot-try. `devices/vip/usr/local/sbin/vip-boot` selects its kernel slot,
-  profile and root; `tests/vip-boot` tests it off the board
+  profile and root, and `try-config` gives a running board a `config.txt` line the same way (the
+  pedal's `config.txt` is written once, at card build): tried once in the spare slot, promoted by
+  validation into `profile.txt`, kept through later kernel trials, taken away with `drop-config`;
+  `tests/vip-boot` tests it off the board
   (`python3 -m unittest discover -s tests/vip-boot`, on Linux). The card layout and the reasons
   are in pedal.project's `docs/vip-image.md`.
   `devices/vip/dt/` holds device-tree overlays the boot partition has to carry, because the

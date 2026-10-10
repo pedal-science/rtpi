@@ -437,6 +437,115 @@ class TestCandidates(FakeVip):
         self.assertIn("isolcpus=managed_irq,domain,1-3", self.read(f"{self.boot}/a/cmdline-tuned.txt"))
 
 
+class TestConfigLines(FakeVip):
+    """A config.txt line reaches a board that is already up the way a kernel does: tried once in the
+    spare slot, promoted by validation into profile.txt, kept through later kernel trials."""
+
+    KMS = "dtoverlay=vc4-kms-v3d"
+
+    def profile_lines(self):
+        return [l for l in self.read(f"{self.boot}/profile.txt").splitlines()
+                if l and not l.startswith("#") and not l.startswith(("os_prefix=", "cmdline="))]
+
+    def promote(self, slot):
+        self.boot_as(slot=slot, tryboot=True)
+        self.run_vb("validate")
+        self.boot_as(slot=slot)
+
+    def test_try_config_arms_the_spare_with_the_line(self):
+        before = self.sizes()
+        self.run_vb("try-config", self.KMS)
+        self.assertEqual(self.state("b"), "trying")
+        self.assertEqual(self.read(f"{self.boot}/b/kernel.release").strip(), OLD, "the running kernel")
+        self.assertEqual(self.read(f"{self.boot}/b/config.lines"), self.KMS + "\n")
+        self.assertEqual(self.armed(), ["os_prefix=b/", self.KMS])
+        self.assertEqual(self.profile(), ("a", "tuned"))
+        self.assertEqual(self.profile_lines(), [], "the default is untouched until it validates")
+        self.assertEqual(self.reboots_seen(), ["0 tryboot"])
+        self.assertEqual(self.sizes(), before)
+
+    def test_validation_makes_the_line_the_default(self):
+        self.run_vb("try-config", self.KMS)
+        self.promote("b")
+        self.assertEqual(self.profile(), ("b", "tuned"))
+        self.assertEqual(self.profile_lines(), [self.KMS])
+        self.assertEqual(self.armed(), [])
+        self.assertIn(self.KMS, self.run_vb("status").stdout)
+
+    def test_a_failed_trial_leaves_the_default_without_it(self):
+        self.run_vb("try-config", self.KMS)
+        self.boot_as(slot="b", tryboot=True)
+        self.set_validate(False)
+        self.run_vb("validate")
+        self.assertEqual(self.state("b"), "bad")
+        self.assertEqual(self.profile(), ("a", "tuned"))
+        self.assertEqual(self.profile_lines(), [])
+
+    def test_a_hang_leaves_the_default_without_it(self):
+        self.run_vb("try-config", self.KMS)
+        self.boot_as(slot="a")
+        self.run_vb("settle")
+        self.assertEqual(self.state("b"), "bad")
+        self.assertEqual(self.profile_lines(), [])
+
+    def test_a_later_kernel_keeps_the_line(self):
+        self.run_vb("try-config", self.KMS)
+        self.promote("b")
+        self.run_vb("try-kernel", NEW)
+        self.assertEqual(self.armed(), ["os_prefix=a/"], "the line is already in force through profile.txt")
+        self.assertEqual(self.read(f"{self.boot}/a/config.lines"), self.KMS + "\n")
+        self.promote("a")
+        self.assertEqual(self.profile(), ("a", "tuned"))
+        self.assertEqual(self.profile_lines(), [self.KMS])
+
+    def test_the_profile_keeps_the_line(self):
+        self.run_vb("try-config", self.KMS)
+        self.promote("b")
+        self.run_vb("default", "loose")
+        self.assertEqual(self.profile(), ("b", "loose"))
+        self.assertEqual(self.profile_lines(), [self.KMS])
+
+    def test_drop_config_takes_it_away_only_when_asked(self):
+        self.run_vb("try-config", self.KMS)
+        self.promote("b")
+        r = self.run_vb("drop-config", self.KMS, check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.profile_lines(), [self.KMS])
+        self.run_vb("drop-config", self.KMS, "--yes")
+        self.assertEqual(self.profile_lines(), [])
+        self.assertEqual(self.profile(), ("b", "tuned"))
+        self.assertEqual(self.read(f"{self.boot}/b/config.lines"), "")
+
+    def test_refuses_lines_that_would_change_what_vip_boot_owns(self):
+        for line in ("os_prefix=a/", "cmdline=x.txt", "kernel=other", "include x.txt", "[pi5]", "",
+                     "# a comment"):
+            r = self.run_vb("try-config", line, check=False)
+            self.assertNotEqual(r.returncode, 0, line)
+        self.assertEqual(self.armed(), [])
+        self.assertEqual(self.state("b"), "empty")
+
+    def test_refuses_a_line_already_in_force(self):
+        self.run_vb("try-config", self.KMS)
+        self.promote("b")
+        self.assertNotEqual(self.run_vb("try-config", self.KMS, check=False).returncode, 0)
+
+    def test_refuses_lines_that_do_not_fit_before_staging_anything(self):
+        before = self.sizes()
+        r = self.run_vb("try-config", "dtparam=" + "x" * 120, check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("doesn't fit", r.stderr)
+        self.assertEqual(self.state("b"), "empty")
+        self.assertEqual(self.armed(), [])
+        self.assertEqual(self.sizes(), before)
+
+    def test_an_older_card_has_no_lines(self):
+        self.assertEqual(self.profile_lines(), [])
+        self.run_vb("try-kernel", NEW)
+        self.assertEqual(self.armed(), ["os_prefix=b/"])
+        self.promote("b")
+        self.assertEqual(self.profile_lines(), [])
+
+
 class TestProfilesAndRoots(FakeVip):
     def test_loose_once(self):
         self.run_vb("loose")
