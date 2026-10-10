@@ -49,7 +49,9 @@ make test-piv              # latency and xrun suite; results go to results/
   command line the firmware actually reads — `config.txt`'s `os_prefix` for a normal boot, so
   `/boot/firmware/current/cmdline.txt`, never a `cmdline.txt` left at the root of the boot
   partition — with `AUDIO_TUNING_ARGS` from `devices/piv/device.env`, keeping every other argument
-  and the line it replaced; `--restore` puts that line back; `tests/piv-boot` tests it off the board
+  and the line it replaced; a tuning this boot has not run takes `--write-active-line` as well as
+  `--yes`, because that line has not been booted; `--restore` puts that line back; `tests/piv-boot`
+  tests it off the board
   (`python3 -m unittest discover -s tests/piv-boot`). It edits the *active* line in place, with no
   candidate behind it and no automatic fallback, which is why an untested change goes through
   tryboot instead. A new kernel still goes through tryboot as before.

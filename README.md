@@ -98,6 +98,9 @@ ssh piv sudo piv-boot set-args
 # write it (the file it replaces is kept beside it), then reboot when you choose
 ssh vip sudo vip-boot set-args --yes
 ssh piv sudo piv-boot set-args --yes
+# on piv, a tuning this boot has not run takes one more word: the line has not been booted, so
+# --yes alone refuses it
+ssh piv sudo piv-boot set-args --yes --write-active-line
 # put the previous line back
 ssh vip sudo vip-boot set-args --restore
 ssh piv sudo piv-boot set-args --restore
@@ -117,6 +120,13 @@ as it was. It refuses to write a line that would lose `rd.shell=` / `rd.emergenc
 line it wrote back before it reports success. Running it twice does nothing the second time.
 Off the board, `tests/piv-boot/` checks all of that against a fake boot partition.
 
+It also writes only a line it can show has been booted: if the tuning arguments about to be written
+are not the ones `/proc/cmdline` is running, `--yes` on its own refuses the write, and
+`--write-active-line` is how you say you mean it anyway. A `/proc/cmdline` that cannot be read is
+taken as no proof rather than as agreement, and the refusal names the file it could not read.
+`--restore` follows the same rule, and it is the one case that stays a single command: putting back
+the line this boot is running — the ordinary undo of a write that just happened — needs no flag.
+
 **What `piv-boot set-args` is not.** It edits the *active* command line — the tree that boots — so
 there is no candidate behind the change and no automatic fallback: a line that does not boot needs a
 serial console, a card reader, or recovery step 5. The route the project designed for an argument
@@ -130,9 +140,9 @@ scripts/safety/arm-try-piv.sh --expect "$(ssh piv uname -r)" --audio-tuning --re
 which copies `current/` to `new/` so the candidate inherits the known-good command line, writes the
 safety arguments into `new/cmdline.txt` after `flash-kernel`, checks that the candidate holds a
 `vmlinuz` and a `.dtb` (without both, the firmware silently ignores `os_prefix`), and reboots once
-through tryboot, leaving `current/` bootable. `set-args` says so in its own output rather than
-refusing the write: it is the smaller tool for a board that is already up and a change small enough
-to be sure of.
+through tryboot, leaving `current/` bootable. `set-args` says that in its own output as well as
+refusing the untried line: it is the smaller tool for a board that is already up, a card with no
+candidate, and arguments already known to boot.
 
 `make vip-try` / `vip-boot try-kernel`, and `make piv-audio-boot-args`, remain the heavier route,
 which is what a *new kernel* needs.
@@ -144,7 +154,9 @@ running kernel as a candidate and lets the firmware's A/B ladder roll it back �
 a new kernel, for the first application of a profile, and for any set of arguments that has not been
 booted before, since an argument set that does not come back is just as effective a way to lose a
 machine as a bad kernel. `piv-boot set-args` above is the smaller second route: one file, one
-reboot, no candidate behind it, for a board that is already up and arguments already known to boot.
+reboot, no candidate behind it, for a board that is already up and arguments already known to boot
+— which it enforces, by asking for `--write-active-line` before it writes a tuning this boot has not
+run.
 
 ### Testing
 
@@ -201,7 +213,8 @@ line. That is a deliberately clean experiment: the one difference between candid
 known-good is the arguments, so a failure to come back is unambiguously the arguments — and
 because the candidate is a real slot, the failure comes back by itself. That is why it is the route
 for an argument set that has not been booted before. `piv-boot set-args` is the same experiment
-without the staging: one file, one reboot, no candidate, and the line it replaced kept beside it.
+without the staging: one file, one reboot, no candidate, and the line it replaced kept beside it —
+and it will not write a tuning this boot has not run unless `--write-active-line` says you mean it.
 
 ### Measured effect
 
