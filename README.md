@@ -315,6 +315,57 @@ A rebuild is worth it for something you cannot get any other way — an out-of-t
 or a different page size for large DSP working sets (`CONFIG_ARM64_4K_PAGES` is what
 Ubuntu ships). It is not worth it to re-set options that are already set.
 
+## vip's kernel: the first candidate change
+
+vip runs Ubuntu's `linux-raspi-realtime` rebuilt with the config fragments in `config/` and **no
+patches of its own**. This is the first change that looks worth carrying as one, recorded here so
+the decision has somewhere to be made rather than being rediscovered.
+
+**The symptom.** A capture on vip dies with
+
+    arecord: pcm_read:2285: read error: Input/output error
+
+and takes the measurement with it. Twice on 2026-10-12, and both times the kernel had already said
+why, on `dma2chan3` — the **I2S capture** direction of the RP1's AXI DMA controller (`dma2chan2` is
+playback), which `/sys/kernel/debug/dmaengine/summary` names:
+
+    dma dma2chan3: dma2chan3 is non-idle!
+    dma dma2chan3: Bad descriptor submitted for dma2chan3, cookie: 54, irq: 0x00002000
+
+**What it is.** `is non-idle!` is `axi_chan_block_xfer_start()` finding the hardware channel still
+enabled while a new transfer is being started — a stream stopping and another starting, which is
+what a measurement session is made of. **The stock driver prints that and returns without
+programming the new transfer**, so the engine goes on to fetch a descriptor it rejects: `irq:
+0x00002000` is bit 13 of `INTSTATUS`, *shadow register or LLI invalid error*
+(`DWAXIDMAC_IRQ_INVALID_ERR`). `axi_chan_handle_err()` then reports it as `Bad descriptor
+submitted` — a message the maintainers agree is misleading, since it fires for decode and slave
+errors too — dumps the transfer's LLIs, and fails it. ALSA turns that into `-EIO`, which is the
+`arecord` error above. The two failures are identical down to the descriptor dump, so this is a
+race with a fixed shape, not corruption.
+
+**The patches.**
+
+- StarFive's fix disables the channel and re-issues the descriptor instead of returning:
+  [1013-dmaengine-dw-axi-dmac-Handle-xfer-start-while-non-id.patch](https://git.cdn.openwrt.org/openwrt/staging/linusw/plain/target/linux/starfive/patches-6.12/1013-dmaengine-dw-axi-dmac-Handle-xfer-start-while-non-id.patch?id=0a1e1016b4d82dabedcb231dc4fd7fb65ba16736).
+  OpenWrt carries it for its StarFive target; it is **not in mainline**, so
+  `7.0.0-1017-raspi-realtime` does not have it. It is 12 lines across two files.
+- Upstream is in the same code: [PATCH 3/3, 2026-10-06](https://lists.openwall.net/linux-kernel/2026/10/06/57)
+  decodes these errors properly and **explicitly leaves the transfer result and recovery path
+  unchanged** — it would relabel this log, not stop the error. Worth taking for the diagnosis, not
+  as the fix.
+- [raspberrypi/linux#7320](https://github.com/raspberrypi/linux/issues/7320) is the playback-side
+  relative (a PCM512x HAT, ending in an oops) and is still open.
+
+**What carrying it would take:** rebase onto the shipped raspi kernel, rebuild with `make vip-rt`,
+install through `make vip-try` so the slot safety net still applies, soak with `namchaind` running
+(the engine holds `i2s:rx` as well, and there the symptom would be a stalled capture rather than a
+failed test), and a bench session that stops and starts the capture over and over — which is what
+pedal.project's `scripts/codec-input-noise.py` does, with `--retry` off so a failure stays visible.
+
+**Not carried yet, and it is the owner's decision.** The evidence, the log decoded, and the
+measurement-side procedure are in pedal.project's
+[docs/audio-dma-irq.md](../pedal.project/docs/audio-dma-irq.md#when-the-capture-dies-pcm_read-inputoutput-error).
+
 ## Things that will bite you
 
 ### `unattended-upgrades` re-runs flash-kernel behind your back

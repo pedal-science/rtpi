@@ -45,6 +45,12 @@ make test-piv              # latency and xrun suite; results go to results/
   compile stops the build. `dtc` is in the build container for that.
 - On piv: no custom kernel flavour names, no `threadirqs` on an RT kernel,
   `RT_GROUP_SCHED` off. `README.md` "Things that will bite you" says why.
+- **vip's kernel is Ubuntu's raspi RT build plus `config/` fragments, and today no patches.** The
+  first candidate change — StarFive's fix for the RP1 audio DMA starting a transfer while the
+  channel is still non-idle, which is what kills an `arecord` capture on vip with
+  `pcm_read: Input/output error` — is recorded in `README.md`, "vip's kernel: the first candidate
+  change", with the evidence, the two other patches in the same code, and what carrying it would
+  take.
 - **piv's designed route for an arguments change is the tryboot one-shot**:
   `scripts/safety/arm-try-piv.sh --expect <release> --audio-tuning` (`make piv-audio-boot-args`)
   stages `current/` as a candidate in `new/` with the tuned arguments, boots it once and falls back
