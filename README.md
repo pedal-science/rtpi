@@ -317,9 +317,12 @@ Ubuntu ships). It is not worth it to re-set options that are already set.
 
 ## vip's kernel: the first candidate change
 
-vip runs Ubuntu's `linux-raspi-realtime` rebuilt with the config fragments in `config/` and **no
-patches of its own**. This is the first change that looks worth carrying as one, recorded here so
-the decision has somewhere to be made rather than being rediscovered.
+vip runs Ubuntu's `linux-raspi-realtime` rebuilt with the config fragments in `config/` and the
+patches in `patches/vip/`. The first of those is StarFive's fix for the capture DMA race below.
+`scripts/build/vip-ubuntu-rt.sh` applies every `patches/vip/*.patch` onto the stock tag before it
+builds. A patched kernel is a different kernel, so the trial has its own `--localversion`
+(`-numaemu3-dmaidle1-trimmed`) and goes through `make vip-try`; the build refuses to reuse the
+release the board is already running, because that would replace the modules the active slot boots.
 
 **The symptom.** A capture on vip dies with
 
@@ -356,14 +359,23 @@ race with a fixed shape, not corruption.
 - [raspberrypi/linux#7320](https://github.com/raspberrypi/linux/issues/7320) is the playback-side
   relative (a PCM512x HAT, ending in an oops) and is still open.
 
-**What carrying it would take:** rebase onto the shipped raspi kernel, rebuild with `make vip-rt`,
-install through `make vip-try` so the slot safety net still applies, soak with `namchaind` running
-(the engine holds `i2s:rx` as well, and there the symptom would be a stalled capture rather than a
-failed test), and a bench session that stops and starts the capture over and over — which is what
-pedal.project's `scripts/codec-input-noise.py` does, with `--retry` off so a failure stays visible.
+**Rebase.** `patches/vip/1013-dmaengine-dw-axi-dmac-Handle-xfer-start-while-non-id.patch` is
+StarFive's change on the shipped `Ubuntu-raspi-7.0.0-1017.17` driver. The OpenWrt patch does not
+apply as-is: this tree's `axi_chan_block_xfer_start()` has no `axi_dma_enable()` call (runtime PM
+enables the controller from `alloc_chan_resources`), and that was the context line the hunk
+needed. `axi_chan_handle_err()` matches upstream 7.0.12. The behaviour is StarFive's: disable the
+channel and program the transfer instead of returning, and on the error that follows, re-issue
+that descriptor instead of failing it.
 
-**Not carried yet, and it is the owner's decision.** The evidence, the log decoded, and the
-measurement-side procedure are in pedal.project's
+**Tried, and promoted, on 2026-10-12.** The release is
+`7.0.0-1017-raspi-realtime-numaemu3-dmaidle1-trimmed`. Validation promoted slot a (sshd, wlan0,
+PREEMPT_RT, the release it was sent to try). Slot b kept
+`7.0.0-1017-raspi-realtime-numaemu3-trimmed`, still marked good. `namchaind` came back holding
+the capture device, and eight one-second `arecord` stop/start cycles on `hw:wm8960` produced no
+`non-idle` line and no `Bad descriptor`. `PEDAL_KERNEL` in `devices/vip/device.env` names this
+release, and so does pedal.project's `devices/vip/image.lock`.
+
+The evidence, the log decoded, and the measurement-side procedure are in pedal.project's
 [docs/audio-dma-irq.md](../pedal.project/docs/audio-dma-irq.md#when-the-capture-dies-pcm_read-inputoutput-error).
 
 ## Things that will bite you
@@ -607,6 +619,7 @@ devices/<host>/device.env    single source of truth for each board's facts
 devices/<host>/etc/          files deployed to the device (validate hook, drop-ins)
 devices/<host>/backups/      pulled backups — off-device, which is the point
 config/*.fragment            kernel config deltas, with rationale per symbol
+patches/vip/*.patch          out-of-tree fixes applied onto vip's stock tag
 scripts/lib/common.sh        shared helpers and the safety guards
 scripts/safety/              backup, preflight, arm, watch, rehearse, panic-button
 scripts/deploy/              things that change a device
@@ -627,8 +640,9 @@ Source is Format 1.0: `.orig.tar.gz` + `.diff.gz`, no `.debian.tar.xz`. Config c
 
 **vip** — the same `linux-raspi` source and the same `raspi-realtime` flavour as piv, rebuilt from
 the tag the stock package was built from (`Ubuntu-raspi-<abi>.<upload>`, read off the board) with
-one delta: `config/vip-numa-emu.fragment` turns `CONFIG_NUMA_EMU` on, which cannot be set at boot
-(the stock kernel answers `Malformed early option 'numa'`), and the module set is trimmed to what
+two deltas: `config/vip-numa-emu.fragment` turns `CONFIG_NUMA_EMU` on, which cannot be set at boot
+(the stock kernel answers `Malformed early option 'numa'`), and `patches/vip/` is applied on top
+(today StarFive's non-idle DMA fix). The module set is trimmed to what
 the board loads plus `config/vip-keep.fragment`'s deliberate exceptions. The config baseline is
 always the **stock** kernel's `/boot/config-*`, never the running rebuild's: a rebuild's config
 already carries the fragment and the trim, so a delta measured against it would be empty. The

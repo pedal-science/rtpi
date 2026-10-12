@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Build vip's pedal kernel: Ubuntu's linux-raspi 7.0.0-1017-raspi-realtime, rebuilt with
-# CONFIG_NUMA_EMU=y and nothing else changed.
+# CONFIG_NUMA_EMU=y and the patches in patches/vip/.
 #
 # WHY UBUNTU'S SOURCE AND NOT MAINLINE
 # vip runs Ubuntu's RT kernel, the one every pedal number was measured on. The source is
 # linux-raspi at the exact tag the installed package was built from (Ubuntu-raspi-<abi>.<upload>,
-# read off the board), so the rebuild differs from what runs today by the fragment alone.
+# read off the board). The rebuild differs from that tag by the fragment and by patches/vip/
+# (today StarFive's non-idle DMA fix; README, "vip's kernel: the first candidate change").
 #
 # WHERE THE CONFIG COMES FROM
 # FALLBACK_KERNEL's own /boot/config-*, pulled off the board — the stock configuration that
@@ -27,7 +28,9 @@
 # The target release is FALLBACK_KERNEL plus a suffix, and the default suffix is PEDAL_KERNEL's own:
 # running this with no arguments rebuilds exactly the release the card image pins (pedal.project
 # devices/vip/image.lock). A new trial gets its own suffix instead (--localversion
-# -numaemu2-trimmed) and goes through `make vip-try` like any candidate before anything pins it.
+# -numaemu3-dmaidle1-trimmed) and goes through `make vip-try` like any candidate before anything
+# pins it. patches/vip/ must not be built as FALLBACK_KERNEL. vip-install-rt.sh refuses to
+# install a release over the kernel the board is running.
 #
 # WHAT IT LEAVES BEHIND
 # build/vip/: the two tarballs, kernelrelease, build-kind, trimmed-ok.txt, proc-modules, the dtb
@@ -131,9 +134,19 @@ KREL_EXPECT="${FALLBACK_KERNEL}${SUFFIX}"
 printf '%s\n' "$([[ $TRIM == 1 ]] && echo trimmed || echo full)" > "$OUT/build-kind"
 log "target release: $KREL_EXPECT (building with -j$JOBS, modules: $([[ $TRIM == 1 ]] && echo trimmed || echo full))"
 
+# patches/vip/ must not be built under the stock fallback's release: that package's modules
+# are what a stock slot boots. A trial of a further change still takes its own --localversion.
+# vip-install-rt.sh refuses to install over the kernel the board is running.
+if compgen -G "$RTPI_ROOT/patches/vip/*.patch" >/dev/null; then
+  [[ $KREL_EXPECT != "$FALLBACK_KERNEL" ]] || die \
+    "patches/vip must not be built as the stock fallback $FALLBACK_KERNEL"
+  log "patches: $(cd "$RTPI_ROOT/patches/vip" && ls -1 *.patch | tr '\n' ' ')"
+fi
+
 docker run --rm -i \
   -v "$VOLUME":/src -v "$CCACHE":/ccache \
   -v "$RTPI_ROOT/config":/config:ro \
+  -v "$RTPI_ROOT/patches/vip":/patches:ro \
   -v "$OUT":/out \
   -e TAG="$TAG" -e TAG_COMMIT="$TAG_COMMIT" -e SUFFIX="$SUFFIX" -e KREL_EXPECT="$KREL_EXPECT" \
   -e JOBS="$JOBS" -e CONFIG_ONLY="$CONFIG_ONLY" -e TRIM="$TRIM" \
@@ -160,6 +173,28 @@ cd "$TREE"
 HEAD=$(git rev-parse HEAD)
 [[ $HEAD == "$TAG_COMMIT" ]] || { echo "!!! $TREE is at $HEAD, expected $TAG_COMMIT ($TAG)" >&2; exit 1; }
 echo "==> source: $TAG ($HEAD)"
+
+# ---------------------------------------------------------------- patches
+# Out-of-tree fixes the shipped tag does not have. The tree lives in the volume and keeps its
+# object files between runs, so the patched sources are restored to the tag first: a second
+# build applies the patches as they are now, instead of stacking them on last run's copy.
+shopt -s nullglob
+patches=(/patches/*.patch)
+shopt -u nullglob
+if (( ${#patches[@]} )); then
+  mapfile -t pfiles < <(git apply --numstat "${patches[@]}" | awk '{print $3}' | sort -u)
+  for f in "${pfiles[@]}"; do
+    if git cat-file -e "HEAD:$f" 2>/dev/null; then
+      git checkout -f HEAD -- "$f"
+    fi
+  done
+  for p in "${patches[@]}"; do
+    echo "==> applying $(basename "$p")"
+    git apply --verbose "$p"
+  done
+else
+  echo "==> no patches in /patches"
+fi
 
 export ARCH=arm64
 

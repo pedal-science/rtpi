@@ -30,6 +30,9 @@ echo "$status" | sed 's/^/  /' >&2
 echo "$status" | grep -q '^running    root=pedal' || die "not running on the pedal root"
 echo "$status" | grep -q 'nothing armed' || die "a one-shot is armed — resolve it first"
 echo "$status" | awk '$3=="*" && $4!="good" {exit 1}' || die "the active slot is not marked good"
+running=$(dev_ssh 'uname -r')
+[[ $running != "$RELEASE" ]] || die \
+  "refusing to install $RELEASE over the kernel vip is running — a trial needs its own release string"
 
 # A half-written kernel tree is worse than none.
 avail=$(dev_ssh "df -Pm / | awk 'NR==2{print \$4}'")

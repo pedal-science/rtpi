@@ -1,0 +1,62 @@
+From: Samin Guo <samin.guo@starfivetech.com>
+Subject: [PATCH] dmaengine: dw-axi-dmac: Handle xfer start while non-idle
+
+StarFive's fix, carried by OpenWrt as
+1013-dmaengine-dw-axi-dmac-Handle-xfer-start-while-non-id.patch and not
+in mainline. Rebased onto Ubuntu-raspi-7.0.0-1017.17.
+
+The behaviour is unchanged from theirs: a start while the channel is
+still enabled disables it and programs the transfer, and the error
+handler re-issues that descriptor instead of failing it. The shipped
+axi_chan_block_xfer_start() does not call axi_dma_enable() — runtime PM
+enables the controller from alloc_chan_resources — so that context line
+from the OpenWrt patch is not in this rebase. axi_chan_handle_err()
+matches upstream 7.0.12.
+
+Signed-off-by: Samin Guo <samin.guo@starfivetech.com>
+Signed-off-by: Curry Zhang <curry.zhang@starfivetech.com>
+---
+--- a/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c
++++ b/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c
+@@ -515,11 +515,13 @@
+ 	u32 irq_mask;
+ 	u8 lms = 0; /* Select AXI0 master for LLI fetching */
+ 
++	chan->is_err = false;
+ 	if (unlikely(axi_chan_is_hw_enable(chan))) {
+ 		dev_err(chan2dev(chan), "%s is non-idle!\n",
+ 			axi_chan_name(chan));
+ 
+-		return;
++		axi_chan_disable(chan);
++		chan->is_err = true;
+ 	}
+ 
+ 	config.dst_multblk_type = DWAXIDMAC_MBLK_TYPE_LL;
+@@ -1183,8 +1185,16 @@
+ 	if (!vd) {
+ 		dev_err(chan2dev(chan), "BUG: %s, IRQ with no descriptors\n",
+ 			axi_chan_name(chan));
++		goto out;
++	}
++	if (chan->is_err) {
++		struct axi_dma_desc *desc = vd_to_axi_desc(vd);
++
++		axi_chan_block_xfer_start(chan, desc);
++		chan->is_err = false;
+ 		goto out;
+ 	}
++
+ 	/* Remove the completed descriptor from issued list */
+ 	list_del(&vd->node);
+ 
+--- a/drivers/dma/dw-axi-dmac/dw-axi-dmac.h
++++ b/drivers/dma/dw-axi-dmac/dw-axi-dmac.h
+@@ -50,6 +50,7 @@
+ 	struct dma_slave_config		config;
+ 	enum dma_transfer_direction	direction;
+ 	bool				cyclic;
++	bool				is_err;
+ 	/* these other elements are all protected by vc.lock */
+ 	bool				is_paused;
+ };

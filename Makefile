@@ -79,7 +79,7 @@ rehearse-piv-failure: ## Prove automatic fallback works with a deliberately brok
 piv-apt-rt: ## Install Ubuntu's linux-raspi-realtime on piv via the tryboot path
 	scripts/deploy/piv-apt-rt.sh
 
-## vip — the pedal Core host: rebuild its Ubuntu kernel with NUMA emulation (config/vip-numa-emu.fragment)
+## vip — the pedal Core host: rebuild its Ubuntu kernel with NUMA emulation and patches/vip/
 .PHONY: vip-rt
 vip-rt: ## 1. Build vip's pedal kernel (stock baseline + the fragment) into build/vip
 	$(SCRIPTS)/build/vip-ubuntu-rt.sh
