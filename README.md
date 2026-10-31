@@ -650,3 +650,9 @@ build asserts the delta is exactly `CONFIG_NUMA_EMU` and `CONFIG_LOCALVERSION`, 
 the board loads is present or built in (minus `trimmed-ok.txt`), that the modules are stripped,
 and that `make kernelrelease` is the string it meant to build.
 
+## Licence
+
+rtpi is MIT ([LICENSE](LICENSE)), except `patches/`. A patch there is a change to the Linux
+kernel, so it is GPL-2.0-only like the kernel it modifies, and stays under its author's copyright
+(its `From:` line): [patches/LICENSE](patches/LICENSE). Kernel config fragments in `config/` and the
+device-tree sources in `devices/` are ours, and MIT.
