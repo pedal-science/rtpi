@@ -54,15 +54,13 @@ make test-piv              # latency and xrun suite; results go to results/
 - **piv's designed route for an arguments change is the tryboot one-shot**:
   `scripts/safety/arm-try-piv.sh --expect <release> --audio-tuning` (`make piv-audio-boot-args`)
   stages `current/` as a candidate in `new/` with the tuned arguments, boots it once and falls back
-  by itself. The smaller route is `devices/piv/usr/local/sbin/piv-boot set-args`, which rewrites the
-  command line the firmware actually reads — `config.txt`'s `os_prefix` for a normal boot, so
-  `/boot/firmware/current/cmdline.txt`, never a `cmdline.txt` left at the root of the boot
-  partition — with `AUDIO_TUNING_ARGS` from `devices/piv/device.env`, keeping every other argument
-  and the line it replaced; a tuning this boot has not run takes `--write-active-line` as well as
-  `--yes`, because that line has not been booted; `--restore` puts that line back; `tests/piv-boot`
-  tests it off the board
-  (`python3 -m unittest discover -s tests/piv-boot`). It edits the *active* line in place, with no
-  candidate behind it and no automatic fallback, which is why an untested change goes through
-  tryboot instead. A new kernel still goes through tryboot as before.
+  by itself. A new kernel always goes this way.
+- **The smaller route, `devices/piv/usr/local/sbin/piv-boot set-args`, has no fallback.** It edits the
+  *active* command line in place, with `AUDIO_TUNING_ARGS` from `devices/piv/device.env`, keeping
+  every other argument and the line it replaced (`--restore` puts that back). The active line is the
+  one `config.txt`'s `os_prefix` points at on a normal boot, `/boot/firmware/current/cmdline.txt` — never a
+  `cmdline.txt` at the root of the boot partition. A tuning this boot has not run needs
+  `--write-active-line` as well as `--yes`, because that line has never been booted. So an untested
+  change goes through tryboot instead. Tests: `python3 -m unittest discover -s tests/piv-boot`.
 
-System context (the pedal, how the repos fit together, the plan): `~/code.local/pedal/pedal.project`, starting at its `CLAUDE.md` and `docs/working-across-repos.md`.
+System context (the pedal, how the repos fit together, the plan): `~/code.local/pedal/pedal.project`, starting at its `AGENTS.md` and `docs/working-across-repos.md`.
