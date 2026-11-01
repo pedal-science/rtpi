@@ -153,19 +153,21 @@ fi
         if not os.path.exists(path):
             return None
         out = {}
-        for line in open(path):
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, _, v = line.partition("=")
-                out[k] = v
+        with open(path) as handle:
+            for line in handle:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    out[k] = v
         return out
 
     def grubenv(self):
         out = {}
-        for line in open(f"{self.root}/boot/grub/grubenv"):
-            if "=" in line:
-                k, _, v = line.strip().partition("=")
-                out[k] = v
+        with open(f"{self.root}/boot/grub/grubenv") as handle:
+            for line in handle:
+                if "=" in line:
+                    k, _, v = line.strip().partition("=")
+                    out[k] = v
         return out
 
     def hook(self, exit_code):
@@ -352,11 +354,12 @@ class DeviceEnvAgrees(FakePro):
         if not os.path.exists(tune):
             self.skipTest("pedal.project is not beside rtpi in this checkout")
         values = {}
-        for line in open(tune):
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, _, v = line.partition("=")
-                values[k] = v.strip().strip('"')
+        with open(tune) as handle:
+            for line in handle:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    values[k] = v.strip().strip('"')
         self.assertEqual(values["ISOLATED_CPUS"], cores,
                          "tune.conf's ISOLATED_CPUS must match the kernel command line")
         self.assertIn(values["RT_CPUS"], cores.split("-"),
