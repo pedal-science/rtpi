@@ -39,5 +39,21 @@ case "$DEVICE" in
     dev_ssh "apt-mark showhold 2>/dev/null | sed 's/^/  /' || true"
     ;;
 
+  pro)
+    # pro-boot status already prints the entries, the trial, grubenv and the installed kernels in
+    # the shape pedal.project's devices/common/check parses, so this adds only what is outside it.
+    dev_ssh "sudo -n pro-boot status 2>&1 || echo '(pro-boot is not installed: run make harden-pro)'"
+    echo
+    echo "--- watchdog ---"
+    dev_ssh "systemctl show | grep -E 'RuntimeWatchdogUSec|WatchdogDevice'"
+    dev_ssh "test -e /dev/watchdog0 && echo '  /dev/watchdog0 present' || echo '  no /dev/watchdog0 (off by default on pro; device.env says why)'"
+    echo "--- isolation in force ---"
+    dev_ssh 'echo "  isolated  : $(cat /sys/devices/system/cpu/isolated)"
+             echo "  nohz_full : $(cat /sys/devices/system/cpu/nohz_full)"
+             echo "  cmdline   : $(grep -o "isolcpus=[^ ]*" /proc/cmdline || echo NONE)"'
+    echo "--- package holds ---"
+    dev_ssh "apt-mark showhold 2>/dev/null | sed 's/^/  /' || true"
+    ;;
+
   *) die "unknown device $DEVICE" ;;
 esac

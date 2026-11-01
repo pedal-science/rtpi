@@ -42,6 +42,68 @@ case "$DEVICE" in
     fi
     ;;
 
+  pro)
+    guard_stock_kernel_installed
+    guard_boot_space "$BOOT_MOUNT" "$BOOT_MIN_FREE_MB"
+
+    # The one assumption the whole design rests on: GRUB must be able to write grubenv, or its
+    # one-shot boot silently does nothing and a trial becomes permanent. /boot is a plain ext4
+    # partition here; this proves it rather than trusting it.
+    abstraction=$(dev_ssh "sudo -n grub-probe --target=abstraction /boot 2>/dev/null | tr '\n' ' '" || true)
+    if [[ -z ${abstraction// /} ]]; then ok "/boot is a plain filesystem (GRUB can write grubenv)"
+    else warn "FAIL: /boot sits on '$abstraction'; GRUB cannot write grubenv there"; fails=$((fails+1)); fi
+    check "grubenv is readable"                  "sudo -n grub-editenv $GRUBENV list"
+    check "grubenv is writable"                  "sudo -n grub-editenv $GRUBENV set rtpi_preflight=1 && sudo -n grub-editenv $GRUBENV unset rtpi_preflight"
+
+    check "pro-boot is installed"                "test -x /usr/local/sbin/pro-boot"
+    check "the validate hook is installed"       "test -x /usr/local/libexec/pro-boot-validate"
+    check "42_pedal is installed"                "test -x /etc/grub.d/42_pedal"
+    check "GRUB_DEFAULT=saved is in force"       "grep -q '^GRUB_DEFAULT=saved' /etc/default/grub.d/90-rtpi.cfg"
+    check "device.env is on the host"            "test -r /etc/rtpi/device.env"
+    check "pro-boot-settle.service enabled"      "systemctl is-enabled pro-boot-settle.service"
+    check "pro-boot-validate.service enabled"    "systemctl is-enabled pro-boot-validate.service"
+    check "pro-boot-deadline.service enabled"    "systemctl is-enabled pro-boot-deadline.service"
+    check "the emergency reboot drop-in is in"   "test -f /etc/systemd/system/emergency.service.d/10-pro-reboot.conf"
+    check "the tuned entry exists"               "sudo -n grep -q \"'$ENTRY_TUNED'\" /boot/grub/grub.cfg"
+    check "Ubuntu's own entry exists (the fallback)" "sudo -n grep -q 'gnulinux-simple-' /boot/grub/grub.cfg"
+    check "kernel and GRUB packages are held"    "apt-mark showhold | grep -q grub"
+    # turbostat is version-matched to the kernel, so a kernel change silently leaves the wrapper
+    # printing "turbostat not found for kernel …". It is the instrument that found 726 SMIs in one
+    # window during a soak (pedal.project bench-results/2026-11-01-soak-pro-rt), which is the only
+    # way an SMI stall is visible at all — so losing it is losing the measurement, quietly.
+    check "turbostat works on the running kernel" \
+      "sudo -n turbostat --quiet --show SMI --num_iterations 1 --interval 1 >/dev/null 2>&1"
+
+    # The saved default must name an entry that is actually in the menu. A default that does not
+    # exist means GRUB falls through to its own first entry, which is not necessarily the one
+    # anybody chose.
+    saved=$(dev_ssh "sudo -n grub-editenv $GRUBENV list | sed -n 's/^saved_entry=//p'" || true)
+    if [[ -z $saved ]]; then
+      warn "FAIL: grubenv has no saved_entry, but GRUB_DEFAULT=saved"; fails=$((fails+1))
+    elif dev_ssh "sudo -n grep -q \"'$saved'\" /boot/grub/grub.cfg"; then
+      ok "the saved default ($saved) is an entry that exists"
+    else
+      warn "FAIL: the saved default '$saved' is not in grub.cfg"; fails=$((fails+1))
+    fi
+
+    # A trial left marked trying would make `pro-boot try` refuse, and means the last one was
+    # never settled.
+    trial_state=$(dev_ssh "sed -n 's/^state=//p' /var/lib/rtpi/pro-boot/trial 2>/dev/null" || true)
+    case "$trial_state" in
+      "")      ok "no trial armed" ;;
+      bad)     ok "the last trial is marked bad (settled)" ;;
+      trying)  warn "FAIL: a trial is armed and untested. Reboot to run it, or run 'pro-boot settle'"
+               fails=$((fails+1)) ;;
+      *)       warn "FAIL: unexpected trial state '$trial_state'"; fails=$((fails+1)) ;;
+    esac
+
+    if [[ -e "$RTPI_ROOT/devices/pro/backups/latest" ]]; then
+      ok "off-device backup present ($(readlink "$RTPI_ROOT/devices/pro/backups/latest"))"
+    else
+      warn "FAIL: no off-device backup — run 'make backup-pro' first"; fails=$((fails+1))
+    fi
+    ;;
+
   *) die "unknown device $DEVICE" ;;
 esac
 

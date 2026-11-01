@@ -1,9 +1,14 @@
 # rtpi
 
-Reproducible PREEMPT_RT kernels for low-latency audio on `piv` (Raspberry Pi 500, arm64, the
-bench stand-in) and `vip` (Raspberry Pi 5, arm64, the pedal's Core host), with automatic
-rollback so a bad kernel can never cost remote access. It also holds each board's device
-facts and deployed config under `devices/<host>/`.
+PREEMPT_RT kernels and boot safety for the pedal's hosts, with automatic rollback so a bad kernel
+can never cost remote access. It holds each host's device facts and deployed boot config under
+`devices/<host>/`.
+
+| Host | What it is | Its kernel | Its boot |
+|---|---|---|---|
+| `vip` | Raspberry Pi 5, arm64, the pedal's Core host | Ubuntu's raspi RT build, **rebuilt here** (`CONFIG_NUMA_EMU`, a module trim, an RP1 DMA patch) | the Pi firmware's `tryboot`, two FAT kernel slots, a rescue root — `vip-boot` |
+| `piv` | Raspberry Pi 500, arm64, the bench stand-in and build host | Ubuntu's `linux-raspi-realtime` from apt | `piboot-try` plus `tryboot` |
+| `pro` | HP ProDesk 600 G5 Mini, **x86-64**, the Core host for the bigger case | Ubuntu's **signed** amd64 `realtime` flavour from apt, **not rebuilt** (Secure Boot is on, and the flavour already has everything `config/audio-rt-common.fragment` asks for) | GRUB: `grub-reboot`'s one-shot and `GRUB_DEFAULT=saved` — `pro-boot` |
 
 ## Commands
 
@@ -18,6 +23,13 @@ make vip-rt                # build vip's kernel in the container (stock baseline
 make vip-install-rt        # install it beside the stock kernel in the running pedal root
 make vip-try               # stage the candidate slot, reboot once, watch it promote or roll back
 make test-piv              # latency and xrun suite; results go to results/
+
+make backup-pro            # pro: GRUB config, grubenv, EFI boot order, BIOS settings
+make harden-pro            # pro: 1. pro-boot, the pedal's GRUB entries, the fallback machinery
+make rehearse-pro-failure  # pro: prove the fallback with a trial that is meant to fail
+make pro-rt                # pro: 2. install Ubuntu's amd64 realtime kernel (not booted)
+make pro-try               # pro: 3. try it with isolation for one boot, and watch it
+make pro-stock             # pro: go back to Ubuntu's own stock-kernel entry
 ```
 
 ## Constraints
@@ -45,6 +57,18 @@ make test-piv              # latency and xrun suite; results go to results/
   compile stops the build. `dtc` is in the build container for that.
 - On piv: no custom kernel flavour names, no `threadirqs` on an RT kernel,
   `RT_GROUP_SCHED` off. `README.md` "Things that will bite you" says why.
+- **pro** (x86-64, UEFI, Secure Boot on) takes the **stock signed** `realtime` package and is never
+  rebuilt here: an unsigned kernel would not load. Its one-shot is GRUB's, which works only because
+  `/boot` is a plain partition — on LVM or RAID, GRUB cannot write `grubenv`, `grub-reboot` would
+  silently do nothing, and a trial would become permanent. `pro-boot` reads `next_entry` back after
+  arming for exactly that reason, and `preflight.sh pro` checks it too.
+  **Run `harden-pro` before `pro-rt`:** with Ubuntu's `GRUB_DEFAULT=0`, merely installing a newer
+  kernel changes what the machine boots, because `10_linux` writes its "Ubuntu" entry for the newest
+  one it finds. `devices/pro/etc/default/grub.d/90-rtpi.cfg` pins that entry to the stock kernel and
+  makes the default a named entry instead of a menu position.
+  pro's watchdog is **off by default**, unlike vip's: `devices/pro/device.env` says why, and
+  `harden-pro --watchdog` opts in. So a kernel that wedges before systemd starts needs a power cycle
+  there; everything after systemd starts is covered.
 - **vip's kernel is Ubuntu's raspi RT build plus `config/` fragments and `patches/vip/`.** The
   first patch is StarFive's fix for the RP1 audio DMA starting a transfer while the channel is
   still non-idle, which is what kills an `arecord` capture on vip with

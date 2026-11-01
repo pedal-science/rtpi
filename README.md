@@ -82,6 +82,51 @@ kernel with the same release string is a different kernel — the release string
 that separates two module sets, which is why trials get their own suffix
 (`--localversion -numaemu2-trimmed`) and go through `vip-try` before anything pins them.
 
+### pro — GRUB already has the one-shot, so there are no slots
+
+pro is x86-64 with UEFI and Secure Boot, and that pair of facts decides nearly everything:
+
+- **It takes Ubuntu's stock signed `realtime` package and is never rebuilt here.** A kernel built
+  the way vip's is would not load under Secure Boot without enrolling a Machine Owner Key. And
+  there is nothing to change: every RT-relevant symbol in `config/audio-rt-common.fragment` is
+  already set in Ubuntu's flavour, which is why vip's rebuild exists for `CONFIG_NUMA_EMU` and an
+  RP1 DMA patch — a Pi I/O chip and a Pi firmware quirk, neither of which pro has.
+- **GRUB already provides the mechanism vip's two FAT slots exist to provide.** `grub-reboot <id>`
+  writes `next_entry` into `grubenv`, and the generated `grub.cfg` boots that entry *once*, clearing
+  it before the kernel loads. A panic, a hang or a reset during that boot lands on the saved default
+  at the next boot, with no action from anyone. So `pro-boot` is about a fifth of `vip-boot`'s size:
+  it writes the entries, tries one, validates it, and promotes or marks it bad.
+
+```
+make backup-pro            # GRUB config, grubenv, EFI boot order, and the BIOS settings
+make harden-pro            # 1. pro-boot, 42_pedal, the units, GRUB_DEFAULT=saved — boots nothing new
+make rehearse-pro-failure  # prove the fallback with a trial that is MEANT to fail
+make pro-rt                # 2. install the realtime kernel, held, not booted
+make pro-try               # 3. try it with the isolation arguments, once, and watch
+make pro-stock             # back to Ubuntu's own stock-kernel entry
+make test-tools            # pro-boot's own tests, off the machine
+```
+
+Three things about it that will bite someone who assumes it is vip:
+
+**`harden-pro` must run before `pro-rt`.** With Ubuntu's stock `GRUB_DEFAULT=0`, *installing* a
+newer kernel changes what the machine boots, because `10_linux` writes its "Ubuntu" entry for the
+newest kernel it finds. `devices/pro/etc/default/grub.d/90-rtpi.cfg` pins that entry to the stock
+kernel (`GRUB_TOP_LEVEL`) and makes the default a named entry in `grubenv` rather than a position in
+a menu. `pro-rt.sh` refuses to install on a host that has not had it.
+
+**The one-shot needs a `/boot` GRUB can write.** On an LVM or RAID `/boot`, `grub-reboot` succeeds
+and changes nothing — and a trial would then become a permanent boot, which is the exact failure
+this whole design exists to prevent. pro's `/boot` is a plain ext4 partition; `pro-boot` reads
+`next_entry` back after arming, `preflight.sh pro` checks the abstraction independently, and
+`tests/pro-boot` has a stub that silently drops writes to prove the refusal works.
+
+**The watchdog is off by default**, unlike vip's, and `devices/pro/device.env` carries the argument:
+vip is unreachable without one, pro is on the bench with "After Power Loss: Previous State" in its
+BIOS, Ubuntu blacklists every watchdog module here, the BIOS's own "Watchdog Timer" is Disable, and
+a watchdog that fires during a deliberate hour-long soak destroys the measurement it fired during.
+`make harden-pro-watchdog` opts in and reports whether the chipset actually gave us a device.
+
 ### Changing the boot arguments on a board that is already up
 
 `AUDIO_TUNING_ARGS` reaches a boot tree only when the tree is built (`init-pedal-boot` on vip,
@@ -597,6 +642,33 @@ recovery ladder starts with the mechanism rather than with a card writer.
 5. **The spare card is the floor.** The card's layout, the rescue root's contents and how an
    image is written are pedal.project's `docs/vip-image.md`. The one act with no card-level
    fallback at all is a bootloader EEPROM write.
+
+### pro will not come back
+
+pro has no rescue root and no watchdog by default, and it does not need the first: GRUB's one-shot
+means the *next* boot is already the known-good one, so almost everything here is "make it reboot".
+
+1. **Wait ~2 minutes.** A trial that boots and fails validation marks itself bad and reboots to the
+   saved default; one that panics gets `panic=10`; one whose root never appears gets dracut's
+   `rd.emergency=reboot`; one that reaches emergency or rescue mode gets a drop-in that reboots
+   after 10 s; one that hangs short of validating gets `pro-boot-deadline` at 600 s.
+   `scripts/safety/watch-reboot.sh pro` will say what came back.
+2. **Power-cycle it once.** The one-shot is consumed, so a cold boot loads the saved default — the
+   entry that was good before. This resolves a hang that got past the firmware.
+3. **Hold Esc or Shift at boot** for GRUB's menu (`GRUB_TIMEOUT_STYLE=hidden` keeps it reachable)
+   and pick "Ubuntu" — Ubuntu's own entry, the stock kernel, which nothing here ever modifies.
+   This is pro's equivalent of vip's rescue root and needs no tooling at all.
+4. **From this Mac**, once ssh works:
+   ```bash
+   ssh pro sudo pro-boot status          # what booted, what the default is, what the trial did
+   ssh pro sudo pro-boot default stock   # stop booting the pedal entry at all
+   ssh pro sudo pro-boot loose           # one boot with no isolation and no engine
+   make pro-rt -- --revert               # remove the realtime kernel entirely
+   scripts/deploy/harden-pro.sh --revert # put GRUB back as Ubuntu had it
+   ```
+5. **The floor is that Ubuntu's own entries are never touched.** 42_pedal only ever *adds* entries,
+   and if its state is missing or names a kernel that is not installed it writes nothing at all and
+   says so. A machine whose pedal entries have all gone still boots.
 
 ### What none of this covers
 

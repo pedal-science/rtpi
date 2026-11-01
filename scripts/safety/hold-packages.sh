@@ -17,8 +17,23 @@ ACTION="${2:?usage: hold-packages.sh <device> <hold|unhold>}"
 load_device "$DEVICE"
 require_ssh
 
-PKGS=(dracut dracut-core dracut-install dracut-network initramfs-tools initramfs-tools-core
-      linux-image-raspi linux-raspi piboot-try flash-kernel)
+case "$DEVICE" in
+  pro)
+    # What must not change under a staged trial. The initramfs generators are here for the same
+    # reason as on piv (regenerating one is what re-ran flash-kernel and destroyed a rollback slot),
+    # and GRUB's packages are here because their postinst runs update-grub — which would rewrite
+    # the menu, and with it the trial entry, mid-test.
+    PKGS=(dracut dracut-core dracut-install dracut-network initramfs-tools initramfs-tools-core
+          grub-common grub2-common grub-efi-amd64 grub-efi-amd64-bin grub-efi-amd64-signed
+          shim-signed
+          "$STOCK_KERNEL_PKG" "linux-modules-$STOCK_KERNEL"
+          "$RT_APT_PKG" "$RT_APT_MODULES")
+    ;;
+  *)
+    PKGS=(dracut dracut-core dracut-install dracut-network initramfs-tools initramfs-tools-core
+          linux-image-raspi linux-raspi piboot-try flash-kernel)
+    ;;
+esac
 
 case "$ACTION" in
   hold)

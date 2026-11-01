@@ -79,6 +79,53 @@ rehearse-piv-failure: ## Prove automatic fallback works with a deliberately brok
 piv-apt-rt: ## Install Ubuntu's linux-raspi-realtime on piv via the tryboot path
 	scripts/deploy/piv-apt-rt.sh
 
+## pro — the x86 Core host for the bigger case. GRUB, not the Pi firmware: its one-shot boot
+## (grub-reboot) is what a trial rides on, so there are no kernel slots to manage.
+.PHONY: backup-pro preflight-pro status-pro hold-pro unhold-pro
+backup-pro: ## Back up pro's GRUB config, grubenv, EFI boot order and BIOS settings
+	$(SCRIPTS)/safety/backup-boot.sh pro
+preflight-pro: ## Check pro is safe to try a kernel on (grubenv writable, fallback present, …)
+	$(SCRIPTS)/safety/preflight.sh pro
+status-pro: ## Show pro's boot entries, default, trial and isolation
+	$(SCRIPTS)/safety/status.sh pro
+hold-pro: ## Stop apt replacing pro's kernel, initramfs or GRUB
+	$(SCRIPTS)/safety/hold-packages.sh pro hold
+unhold-pro: ## Undo hold-pro
+	$(SCRIPTS)/safety/hold-packages.sh pro unhold
+
+.PHONY: harden-pro harden-pro-watchdog
+harden-pro: ## 1. Install pro-boot, the pedal's GRUB entries and the fallback machinery
+	$(SCRIPTS)/deploy/harden-pro.sh
+harden-pro-watchdog: ## As harden-pro, and arm the chipset watchdog (off by default: see device.env)
+	$(SCRIPTS)/deploy/harden-pro.sh --watchdog
+
+.PHONY: pro-rt
+pro-rt: ## 2. Install Ubuntu's amd64 realtime kernel (not booted)
+	$(SCRIPTS)/deploy/pro-rt.sh
+
+.PHONY: pro-try
+pro-try: ## 3. Try that kernel with the isolation arguments for one boot, and watch it
+	@REL=$$(sed -n 's/^PEDAL_KERNEL=//p' devices/pro/device.env | tr -d '"'); \
+	  ARGS=$$(sed -n 's/^AUDIO_TUNING_ARGS=//p' devices/pro/device.env | tr -d '"'); \
+	  echo "trying $$REL with: $$ARGS"; \
+	  : "pro-boot reboots at the end, which closes the connection and makes ssh exit 255. That"; \
+	  : "is the success path, so the exit status cannot be the test — it failed the whole target"; \
+	  : "on a trial that had armed correctly (2026-11-01). watch-reboot is the test instead: its"; \
+	  : "first phase fails with 'device never went down' when nothing was actually armed."; \
+	  ssh pro "sudo -n pro-boot try --kernel $$REL --args '$$ARGS'" || true; \
+	  sleep 5; \
+	  $(SCRIPTS)/safety/watch-reboot.sh pro --expect "$$REL"
+
+.PHONY: pro-loose pro-stock
+pro-loose: ## Boot pro once with no isolation and no engine (the loose profile)
+	ssh pro sudo -n pro-boot loose
+pro-stock: ## Make Ubuntu's own stock-kernel entry the default again
+	ssh pro sudo -n pro-boot default stock
+
+.PHONY: rehearse-pro-failure
+rehearse-pro-failure: ## Prove the fallback: try a deliberately broken boot line and watch it return
+	$(SCRIPTS)/safety/rehearse-pro.sh
+
 ## vip — the pedal Core host: rebuild its Ubuntu kernel with NUMA emulation and patches/vip/
 .PHONY: vip-rt
 vip-rt: ## 1. Build vip's pedal kernel (stock baseline + the fragment) into build/vip
@@ -134,9 +181,10 @@ piv-vendor-rt: image ## Build an RT kernel from the raspberrypi/linux tree
 
 ## Tests
 .PHONY: test-tools test-piv report
-test-tools: ## Run the off-board suites (vip-boot, piv-boot) — no board is touched
+test-tools: ## Run the off-board suites (vip-boot, piv-boot, pro-boot) — no board is touched
 	@python3 -m unittest discover -s tests/vip-boot
 	@python3 -m unittest discover -s tests/piv-boot
+	@python3 -m unittest discover -s tests/pro-boot
 test-piv: ## Run the latency + xrun suite on piv
 	scripts/test/run-suite.sh piv
 report: ## Render a comparison table across all recorded runs

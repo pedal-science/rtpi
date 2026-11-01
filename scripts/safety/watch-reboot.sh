@@ -97,14 +97,19 @@ while (( $(elapsed) < TIMEOUT )); do
         # itself mean the candidate booted: while a freshly frozen fallback holds the same
         # kernel version as the candidate, both slots report identical uname output.
         ok "kernel matches --expect"
-        # vip marks the booted slot on the kernel cmdline (vipboot.slot=…, rtpi's vip-boot).
+        # vip marks the booted slot on the kernel cmdline (vipboot.slot=…, rtpi's vip-boot) and pro
+        # marks the booted entry and profile the same way (pedalboot.entry=, pedalboot.profile=).
         # piv's piboot-try marks nothing, so there the version is all we have.
         SLOT=$(ssh "${SSH_OPTS[@]}" -o ConnectTimeout=6 "${LAST_PATH:-$SSH_HOST}" \
-               "grep -oE 'vipboot\.slot=[a-z-]*' /proc/cmdline 2>/dev/null" || true)
-        if [[ -n $SLOT ]]; then
-          ok "booted slot: ${SLOT#vipboot.slot=}"
+               "grep -oE '(vipboot\.slot|pedalboot\.(entry|profile))=[a-z0-9-]*' /proc/cmdline 2>/dev/null | tr '\n' ' '" || true)
+        if [[ -n ${SLOT// /} ]]; then
+          ok "booted: $SLOT"
+          # A pedal entry that came back as the trial means validation has not finished yet; one
+          # that came back as tuned or stock means it either promoted or fell back.
+          [[ $SLOT == *profile=trial* ]] && \
+            warn "this is still the trial boot: pro-boot-validate.service decides next"
         else
-          warn "no slot marker on the kernel cmdline — cannot tell which slot booted"
+          warn "no boot marker on the kernel cmdline — cannot tell which entry booted"
         fi
         echo "$kernel"; exit 0
       else
