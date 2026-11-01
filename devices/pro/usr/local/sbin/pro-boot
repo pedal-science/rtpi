@@ -1,0 +1,550 @@
+#!/usr/bin/python3
+"""pro-boot — choose what pro boots: kernel, boot arguments, profile.
+
+    pro-boot status
+    pro-boot try --kernel <release> [--args '<args>'] [--no-reboot]
+    pro-boot try-args '<args>' [--no-reboot]      the running kernel with new tuned arguments, once
+    pro-boot set-args [--yes] [--restore]         rewrite the tuned line from device.env, no trial
+    pro-boot loose [--no-reboot]                  one boot in the loose profile
+    pro-boot default tuned|loose|stock            what boots from now on
+
+  run by units, not by hand:
+    pro-boot settle          early every boot: a trial still marked trying on a normal boot failed
+    pro-boot validate        on a trial boot: check it, then promote it or mark it bad and reboot
+    pro-boot deadline --after N
+                             on a trial boot, sleeping first: a trial that never validated reboots
+
+HOW IT WORKS (pedal.project's docs/pro.md has the reasons)
+
+This is vip-boot's job on a machine that boots with GRUB, and it is about a fifth of the size,
+because GRUB already provides the mechanism vip's two FAT kernel slots exist to provide:
+
+  * `grub-reboot <id>` writes next_entry into grubenv. The generated grub.cfg boots that entry
+    ONCE: it sets default from next_entry, clears next_entry, saves the environment, and sets
+    boot_once so nothing promotes it. A reset, a panic or a hang during that boot therefore lands
+    on the saved default at the next boot, with no action from us. That is the whole safety net.
+  * `GRUB_DEFAULT=saved` plus saved_entry in grubenv is the promotion mechanism.
+
+What is left for this tool is the policy around those two: write the entries, try one once,
+validate it on its own boot, promote it or mark it bad, and never leave a machine with nothing
+good to boot.
+
+  /var/lib/rtpi/pro-boot/promoted    kernel=, args=   what pedal-tuned boots
+  /var/lib/rtpi/pro-boot/trial       kernel=, args=, state=trying|bad, reason=, armed=
+  /etc/grub.d/42_pedal               turns those into menu entries at every update-grub
+  /etc/rtpi/device.env               the defaults, and the reasons
+
+Ubuntu's own entries are never touched. They are the fallback, they keep their ids, and
+`pro-boot default stock` goes back to them.
+
+WHAT THIS CANNOT DO. A kernel that wedges before systemd starts needs a power cycle: pro has no
+armed watchdog by default (device.env says why, and harden-pro.sh --watchdog opts in). Everything
+after systemd starts is covered — panic=10, dracut's emergency reboot, the deadline unit, and the
+emergency/rescue drop-ins.
+
+Paths are overridable for the tests: PROBOOT_PREFIX is put in front of every absolute path,
+PROBOOT_REBOOT names a command run instead of `systemctl reboot`, and PROBOOT_UPDATE_GRUB one run
+instead of `update-grub`. Each is split on whitespace, so their arguments must contain none.
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+import time
+
+PREFIX = os.environ.get("PROBOOT_PREFIX", "")
+
+
+def p(path):
+    """An absolute path, under PROBOOT_PREFIX when the tests set one."""
+    return PREFIX + path
+
+
+DEVICE_ENV = "/etc/rtpi/device.env"
+STATE_DIR = "/var/lib/rtpi/pro-boot"
+PROMOTED = STATE_DIR + "/promoted"
+TRIAL = STATE_DIR + "/trial"
+GRUB_CFG = "/boot/grub/grub.cfg"
+GRUBENV = "/boot/grub/grubenv"
+VALIDATE_HOOK = "/usr/local/libexec/pro-boot-validate"
+
+
+def say(*words):
+    print("pro-boot:", *words, file=sys.stderr)
+
+
+def die(*words):
+    say(*words)
+    sys.exit(1)
+
+
+def run(argv, check=True, capture=False):
+    """A command, with its output shown unless we want to read it."""
+    if capture:
+        out = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        if check and out.returncode != 0:
+            die("%s failed (%d)" % (" ".join(argv), out.returncode))
+        return out.stdout
+    code = subprocess.run(argv).returncode
+    if check and code != 0:
+        die("%s failed (%d)" % (" ".join(argv), code))
+    return code
+
+
+# ---------------------------------------------------------------- small key=value files
+# device.env is shell and the state files are written by this tool, so both are read rather than
+# sourced: nothing in them should be able to run as root just because grub-mkconfig read it.
+def read_conf(path):
+    values = {}
+    try:
+        with open(p(path)) as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                values[key.strip()] = value.strip().strip('"')
+    except OSError:
+        return {}
+    return values
+
+
+def write_conf(path, values):
+    os.makedirs(p(os.path.dirname(path)), exist_ok=True)
+    tmp = p(path) + ".new"
+    with open(tmp, "w") as handle:
+        handle.write("# Written by pro-boot. Edit with pro-boot, not by hand.\n")
+        for key, value in values.items():
+            handle.write("%s=%s\n" % (key, value))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, p(path))
+
+
+def device_env():
+    env = read_conf(DEVICE_ENV)
+    if not env:
+        die("cannot read %s. Has scripts/deploy/harden-pro.sh run?" % DEVICE_ENV)
+    return env
+
+
+def promoted():
+    return read_conf(PROMOTED)
+
+
+def trial():
+    return read_conf(TRIAL)
+
+
+# ---------------------------------------------------------------- this boot
+def cmdline():
+    try:
+        with open(p("/proc/cmdline")) as handle:
+            return handle.read().split()
+    except OSError:
+        return []
+
+
+def boot_word(key):
+    for word in cmdline():
+        if word.startswith(key + "="):
+            return word[len(key) + 1:]
+    return None
+
+
+def this_profile():
+    """tuned, loose, trial — or None on a boot that is not one of the pedal's entries."""
+    return boot_word("pedalboot.profile")
+
+
+def running_release():
+    return os.uname().release
+
+
+# ---------------------------------------------------------------- GRUB
+def update_grub():
+    """Regenerate grub.cfg, which is what turns the state files into menu entries (42_pedal).
+
+    Ubuntu's update-grub writes a .new and renames it, so a failure here leaves the previous,
+    working grub.cfg in place rather than half of a new one.
+
+    PROBOOT_UPDATE_GRUB replaces the command for the tests. It deliberately does NOT become a no-op
+    just because PROBOOT_PREFIX is set: arming depends on the entry existing *after* this runs, and
+    a test whose update-grub did nothing could not catch that ordering being wrong."""
+    run((os.environ.get("PROBOOT_UPDATE_GRUB") or "update-grub").split())
+
+
+def grub_cfg_has(entry_id):
+    try:
+        with open(p(GRUB_CFG)) as handle:
+            return ("'%s'" % entry_id) in handle.read()
+    except OSError:
+        return False
+
+
+def grubenv():
+    out = run(["grub-editenv", p(GRUBENV), "list"], check=False, capture=True) or ""
+    return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+
+
+def stock_entry_id():
+    """Ubuntu's own default entry: the one 10_linux writes for the top-level kernel. Read from
+    grub.cfg rather than guessed, because it carries the root filesystem's UUID."""
+    try:
+        with open(p(GRUB_CFG)) as handle:
+            found = re.findall(r"'(gnulinux-simple-[^']+)'", handle.read())
+    except OSError:
+        found = []
+    if not found:
+        die("no gnulinux-simple-* entry in %s: Ubuntu's own entry is the fallback, and it is "
+            "missing. Run update-grub and look at the file before going further." % GRUB_CFG)
+    return found[0]
+
+
+def set_default(entry_id):
+    if not grub_cfg_has(entry_id):
+        die("%s has no entry '%s'. Not setting a default that cannot boot." % (GRUB_CFG, entry_id))
+    run(["grub-set-default", entry_id])
+    say("default boot entry is now '%s'" % entry_id)
+
+
+def arm_once(entry_id):
+    """The one-shot. Verified by reading grubenv back: if /boot's filesystem were one GRUB cannot
+    write (LVM, RAID), `grub-reboot` would succeed and change nothing, and the machine would boot
+    the trial for ever instead of once. That is the one failure mode of this whole design, so it is
+    checked here rather than assumed."""
+    if not grub_cfg_has(entry_id):
+        die("%s has no entry '%s'" % (GRUB_CFG, entry_id))
+    run(["grub-reboot", entry_id])
+    got = grubenv().get("next_entry")
+    if got != entry_id:
+        die("grub-reboot did not take: grubenv's next_entry is %r, wanted %r.\n"
+            "         GRUB could not write %s. Nothing has been armed; the machine still boots "
+            "its default." % (got, entry_id, GRUBENV))
+    say("armed '%s' for the next boot only" % entry_id)
+
+
+def reboot(do_it):
+    if not do_it:
+        say("not rebooting (--no-reboot). The next boot is the armed one.")
+        return
+    override = os.environ.get("PROBOOT_REBOOT")
+    say("rebooting")
+    run(override.split() if override else ["systemctl", "reboot"])
+
+
+# ---------------------------------------------------------------- guards
+def refuse_on_trial_boot(what):
+    if this_profile() == "trial":
+        die("this boot IS a trial (pedalboot.profile=trial). %s now would stack one trial on "
+            "another, and the fallback only remembers one.\n"
+            "         Let validation finish, or reboot to the default first." % what)
+
+
+def require_kernel(release):
+    missing = [f for f in ("/boot/vmlinuz-%s" % release,
+                           "/boot/initrd.img-%s" % release,
+                           "/lib/modules/%s" % release) if not os.path.exists(p(f))]
+    if missing:
+        die("kernel %s is not fully installed: missing %s" % (release, ", ".join(missing)))
+
+
+def require_boot_space(env):
+    want = int(env.get("BOOT_MIN_FREE_MB", "200"))
+    stat = os.statvfs(p("/boot"))
+    free = stat.f_bavail * stat.f_frsize // (1024 * 1024)
+    if free < want:
+        die("only %d MB free on /boot, want %d. Refusing to rewrite grub.cfg." % (free, want))
+
+
+def tuned_args(env):
+    """The isolation arguments: what has been promoted, or device.env's if nothing has yet."""
+    return promoted().get("args") or env.get("AUDIO_TUNING_ARGS", "")
+
+
+# ---------------------------------------------------------------- commands
+def cmd_status(args, env):
+    state, armed = promoted(), trial()
+    print("running kernel : %s" % running_release())
+    print("realtime       : %s" % ("YES (PREEMPT_RT)" if "PREEMPT_RT" in os.uname().version
+                                   else "no"))
+    print("this boot      : profile=%s entry=%s" % (this_profile() or "-",
+                                                    boot_word("pedalboot.entry") or "-"))
+    print("uptime         : %s" % run(["uptime", "-p"], check=False, capture=True).strip())
+    print()
+    # The same shape vip-boot status prints, because pedal.project's devices/common/check parses
+    # both: "slot <name> <*|-> <state> <release> <args>".
+    #
+    # TWO slot lines, not three: the parser's model is "what the pedal boots" and "what it falls
+    # back to", which is the right model here too — the loose entry is a profile of the same kernel,
+    # not a thing to fall back to, so it is reported below instead of pretending to be a slot.
+    #
+    # The star column is never blank. With a space there, awk collapses it and the state becomes
+    # field 3 on one row and field 4 on another, which silently gave `check` an empty release to
+    # compare (2026-11-01).
+    env_now = grubenv()
+    default = env_now.get("saved_entry", "(none saved; GRUB_DEFAULT decides)")
+    tuned = env.get("ENTRY_TUNED", "pedal-tuned")
+    print("--- boot entries ---")
+    print("slot %-8s %s  %-7s %-22s %s"
+          % ("pedal", "*" if default == tuned else "-",
+             "good" if grub_cfg_has(tuned) else "absent",
+             state.get("kernel", "-"), state.get("args", "") or "(no isolation arguments)"))
+    print("slot %-8s %s  %-7s %-22s %s"
+          % ("stock", "*" if default.startswith("gnulinux") else "-",
+             "good" if grub_cfg_has(stock_entry_id()) else "absent",
+             env.get("STOCK_KERNEL", "-"), "(Ubuntu's own entry)"))
+    print()
+    loose = env.get("ENTRY_LOOSE", "pedal-loose")
+    print("--- profiles ---")
+    print("  %-12s %s  %s" % (loose, "*" if default == loose else " ",
+                              env.get("LOOSE_ARGS", "-")))
+    print()
+    print("--- trial ---")
+    if not armed:
+        print("  nothing armed")
+    else:
+        print("  kernel=%s state=%s armed=%s" % (armed.get("kernel", "?"),
+                                                 armed.get("state", "?"),
+                                                 armed.get("armed", "?")))
+        print("  args=%s" % armed.get("args", ""))
+        if armed.get("reason"):
+            print("  reason=%s" % armed["reason"])
+    print()
+    print("--- grubenv ---")
+    for key in ("saved_entry", "next_entry", "prev_entry", "recordfail", "boot_success"):
+        if key in env_now:
+            print("  %s=%s" % (key, env_now[key]))
+    print("--- /boot ---")
+    stat = os.statvfs(p("/boot"))
+    print("  %d MB free" % (stat.f_bavail * stat.f_frsize // (1024 * 1024)))
+    print("--- kernels installed ---")
+    for release in sorted(os.path.basename(f)[len("vmlinuz-"):]
+                          for f in os.listdir(p("/boot")) if f.startswith("vmlinuz-")):
+        marks = []
+        if release == state.get("kernel"):
+            marks.append("pedal")
+        if release == env.get("FALLBACK_KERNEL"):
+            marks.append("fallback")
+        if release == running_release():
+            marks.append("running")
+        print("  %-24s %s" % (release, ",".join(marks) or "-"))
+    return 0
+
+
+def cmd_try(args, env):
+    refuse_on_trial_boot("Arming another trial")
+    armed = trial()
+    if armed.get("state") == "trying":
+        die("a trial is already armed and untested (kernel %s). Reboot to run it, or clear it "
+            "with `pro-boot settle` after a normal boot." % armed.get("kernel"))
+    release = args.kernel or running_release()
+    line = args.args if args.args is not None else tuned_args(env)
+    require_kernel(release)
+    require_boot_space(env)
+    # The fallback has to exist, or there is nothing to come back to.
+    fallback = env.get("FALLBACK_KERNEL")
+    if fallback and not os.path.exists(p("/boot/vmlinuz-%s" % fallback)):
+        die("the fallback kernel %s is not installed. Refusing to try anything." % fallback)
+    if not grub_cfg_has(stock_entry_id()):
+        die("Ubuntu's own entry is not in grub.cfg; that is the fallback. Run update-grub first.")
+    write_conf(TRIAL, {"kernel": release, "args": line, "state": "trying",
+                       "armed": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+    say("trial: kernel %s" % release)
+    say("trial: args %s" % line)
+    update_grub()
+    arm_once(env.get("ENTRY_TRIAL", "pedal-trial"))
+    say("on the trial's own boot, pro-boot-validate.service decides: it is promoted only if ssh,")
+    say("a real network address, the expected kernel and namchaind all come up. Anything else —")
+    say("including a panic or a hang — and the next boot is the current default again.")
+    reboot(not args.no_reboot)
+    return 0
+
+
+def cmd_try_args(args, env):
+    args.kernel = None
+    args.args = args.argline
+    return cmd_try(args, env)
+
+
+def cmd_set_args(args, env):
+    """Rewrite the tuned entry's arguments with no trial behind the change.
+
+    This is piv-boot's `set-args` on pro: the small route, for an argument line that has already
+    been booted. An untested line goes through `try-args`, which falls back by itself."""
+    state = promoted()
+    if not state.get("kernel"):
+        die("nothing is set up yet: run scripts/deploy/harden-pro.sh first")
+    have = state.get("args", "")
+    if args.restore:
+        want = state.get("prev_args", "")
+        where = "the line this replaced"
+        if "prev_args" not in state:
+            die("there is no previous line to restore: set-args has not written one.")
+    else:
+        want = env.get("AUDIO_TUNING_ARGS", "")
+        where = "device.env's AUDIO_TUNING_ARGS"
+    if have == want:
+        say("the tuned line already matches %s; nothing to do" % where)
+        return 0
+    print("- %s" % have)
+    print("+ %s" % want)
+    if not args.yes:
+        say("this changes the DEFAULT boot line with no trial behind it. Add --yes to write it,")
+        say("or use `pro-boot try-args '<args>'`, which boots once and falls back by itself.")
+        return 2
+    state["prev_args"] = have
+    state["args"] = want
+    write_conf(PROMOTED, state)
+    update_grub()
+    say("written (--restore puts the old line back). It takes effect at the next boot.")
+    return 0
+
+
+def cmd_loose(args, env):
+    refuse_on_trial_boot("Booting loose")
+    if not os.path.exists(p("/etc/systemd/system/pedal-maint.target")):
+        die("/etc/systemd/system/pedal-maint.target is missing. Without it systemd.unit= would "
+            "drop this machine into emergency mode with no network.\n"
+            "         Apply pedal.project's devices/pro first.")
+    arm_once(env.get("ENTRY_LOOSE", "pedal-loose"))
+    reboot(not args.no_reboot)
+    return 0
+
+
+def cmd_default(args, env):
+    which = args.which
+    if which == "stock":
+        set_default(stock_entry_id())
+        say("pro now boots Ubuntu's own entry: the stock kernel, no isolation, and the engine")
+        say("still starts (namchaind is enabled). This is the state to leave the machine in if")
+        say("the pedal's kernel is in doubt.")
+    elif which == "tuned":
+        set_default(env.get("ENTRY_TUNED", "pedal-tuned"))
+    elif which == "loose":
+        set_default(env.get("ENTRY_LOOSE", "pedal-loose"))
+    return 0
+
+
+def cmd_validate(args, env):
+    """On a trial's own boot: promote it, or mark it bad and reboot."""
+    if this_profile() != "trial":
+        return 0
+    armed = trial()
+    if armed.get("state") != "trying":
+        say("this is a trial boot but no trial is marked trying; nothing to validate")
+        return 0
+    release = armed.get("kernel", running_release())
+    hook = p(VALIDATE_HOOK)
+    if os.access(hook, os.X_OK):
+        code = subprocess.run([hook, release]).returncode
+    else:
+        say("WARNING: %s is missing; falling back to the kernel version check alone" % VALIDATE_HOOK)
+        code = 0 if running_release() == release else 1
+    if code == 0:
+        # Promote: the trial's kernel and arguments become the tuned entry's, the trial goes away
+        # (so no stray entry is left to boot), and saved_entry points at the tuned entry.
+        state = promoted()
+        state["kernel"] = armed["kernel"]
+        state["args"] = armed.get("args", "")
+        write_conf(PROMOTED, state)
+        os.unlink(p(TRIAL))
+        update_grub()
+        set_default(env.get("ENTRY_TUNED", "pedal-tuned"))
+        say("PROMOTED: kernel %s with these arguments is now what pro boots." % armed["kernel"])
+        return 0
+    armed["state"] = "bad"
+    armed["reason"] = "validation failed on %s" % time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    write_conf(TRIAL, armed)
+    update_grub()
+    say("validation FAILED: the trial is marked bad and its entry is gone. Rebooting to the")
+    say("default, which is the safety net working as designed.")
+    reboot(True)
+    return 1
+
+
+def cmd_settle(args, env):
+    """Early on every boot that is not a trial: a trial still marked trying never validated, so it
+    panicked, hung and was reset, or GRUB fell back before it ran. Either way it failed."""
+    if this_profile() == "trial":
+        return 0
+    armed = trial()
+    if armed.get("state") != "trying":
+        return 0
+    armed["state"] = "bad"
+    armed["reason"] = ("never validated: this boot is %s, not the trial" %
+                       (this_profile() or "not a pedal entry"))
+    write_conf(TRIAL, armed)
+    update_grub()
+    say("the armed trial (kernel %s) never validated; marked bad and its entry removed"
+        % armed.get("kernel"))
+    return 0
+
+
+def cmd_deadline(args, env):
+    """On a trial boot only: if validation has not finished in time, reboot so the machine falls
+    back. This covers the boot that comes up far enough to run systemd and then hangs short of
+    validating — where nothing else would ever reboot it, and the trial's entry is not the default
+    so a reboot is all it takes."""
+    if this_profile() != "trial":
+        return 0
+    time.sleep(args.after)
+    armed = trial()
+    if not armed or armed.get("state") != "trying":
+        return 0
+    armed["state"] = "bad"
+    armed["reason"] = "did not validate within %ds" % args.after
+    write_conf(TRIAL, armed)
+    update_grub()
+    say("the trial did not validate within %ds; marked bad, rebooting to the default" % args.after)
+    reboot(True)
+    return 1
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(prog="pro-boot", description=__doc__.splitlines()[0],
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("status").set_defaults(fn=cmd_status)
+
+    t = sub.add_parser("try")
+    t.add_argument("--kernel")
+    t.add_argument("--args")
+    t.add_argument("--no-reboot", action="store_true")
+    t.set_defaults(fn=cmd_try)
+
+    ta = sub.add_parser("try-args")
+    ta.add_argument("argline")
+    ta.add_argument("--no-reboot", action="store_true")
+    ta.set_defaults(fn=cmd_try_args)
+
+    sa = sub.add_parser("set-args")
+    sa.add_argument("--yes", action="store_true")
+    sa.add_argument("--restore", action="store_true")
+    sa.set_defaults(fn=cmd_set_args)
+
+    lo = sub.add_parser("loose")
+    lo.add_argument("--no-reboot", action="store_true")
+    lo.set_defaults(fn=cmd_loose)
+
+    d = sub.add_parser("default")
+    d.add_argument("which", choices=("tuned", "loose", "stock"))
+    d.set_defaults(fn=cmd_default)
+
+    sub.add_parser("validate").set_defaults(fn=cmd_validate)
+    sub.add_parser("settle").set_defaults(fn=cmd_settle)
+
+    dl = sub.add_parser("deadline")
+    dl.add_argument("--after", type=int, default=300)
+    dl.set_defaults(fn=cmd_deadline)
+
+    args = parser.parse_args(argv[1:])
+    if os.geteuid() != 0 and args.cmd != "status":
+        die("run as root")
+    return args.fn(args, device_env())
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

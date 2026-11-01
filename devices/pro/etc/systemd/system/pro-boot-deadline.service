@@ -1,0 +1,25 @@
+[Unit]
+Description=pro-boot: a trial boot that hasn't validated in ten minutes reboots, so it falls back
+Documentation=file:/usr/local/sbin/pro-boot
+# The gap this closes: a trial that boots far enough to start systemd and then hangs short of
+# validating. Nothing else would ever reboot it — the engine is not up to trip anything, the
+# watchdog is off by default on pro, and GRUB's one-shot has already been spent — so the machine
+# would sit on an untested kernel until somebody noticed. A reboot is all it takes, because the
+# trial is not the saved default: the next boot is the known-good one.
+#
+# Started early and ordered after nothing, so whatever hangs cannot hold it up. Type=simple, so its
+# sleep is not a pending job other units wait behind. ConditionKernelCommandLine means a normal
+# boot never arms it.
+DefaultDependencies=no
+ConditionKernelCommandLine=pedalboot.profile=trial
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=simple
+# Comfortably longer than pro-boot-validate.service's own 400 s budget, so a slow but succeeding
+# validation is never cut off by this.
+ExecStart=/usr/local/sbin/pro-boot deadline --after 600
+
+[Install]
+WantedBy=sysinit.target

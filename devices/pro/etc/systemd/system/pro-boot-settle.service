@@ -1,0 +1,16 @@
+[Unit]
+Description=pro-boot: mark a trial that never validated as bad
+Documentation=file:/usr/local/sbin/pro-boot
+# Runs on every boot; pro-boot settle decides for itself whether this one is a trial. A trial still
+# marked "trying" when a NON-trial boot reaches here never validated — it panicked, hung and was
+# reset, or GRUB's one-shot had already been consumed. Either way it failed, and leaving it marked
+# trying would make the next `pro-boot try` refuse.
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/pro-boot settle
+
+[Install]
+WantedBy=multi-user.target pedal-maint.target

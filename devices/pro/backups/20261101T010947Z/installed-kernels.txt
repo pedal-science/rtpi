@@ -1,0 +1,34 @@
+ii  grub-efi-amd64                                   2.14-2ubuntu1                              amd64        GRand Unified Bootloader, version 2 (EFI-AMD64 version)
+ii  grub-efi-amd64-bin                               2.14-2ubuntu1                              amd64        GRand Unified Bootloader, version 2 (EFI-AMD64 modules)
+ii  grub-efi-amd64-signed                            1.215+2.14-2ubuntu1                        amd64        GRand Unified Bootloader, version 2 (EFI-AMD64 version, signed)
+ii  grub-efi-amd64-unsigned                          2.14-2ubuntu1                              amd64        GRand Unified Bootloader, version 2 (EFI-AMD64 images)
+ii  grub2-common                                     2.14-2ubuntu2.1                            amd64        GRand Unified Bootloader (common files for version 2)
+ii  linux-image-7.0.0-42-generic                     7.0.0-42.42                                amd64        Signed kernel image generic
+ii  linux-image-generic                              7.0.0-42.42                                amd64        Generic Linux kernel image
+ii  linux-modules-7.0.0-42-generic                   7.0.0-42.42                                amd64        Linux kernel modules for version 7.0.0
+ii  shim-signed                                      1.59+15.8-0ubuntu2                         amd64        Secure Boot chain-loading bootloader (Microsoft-signed binary)
+== holds
+== /boot
+total 94004
+drwxr-xr-x  5 root root     4096 Oct 31 06:56 .
+drwxr-xr-x 20 root root     4096 Oct 30 19:59 ..
+-rw-------  1 root root 10889219 Oct 15 06:48 System.map-7.0.0-42-generic
+-rw-r--r--  1 root root   308596 Oct 15 06:48 config-7.0.0-42-generic
+drwxr-xr-x  3 root root     4096 Jan  1  1970 efi
+drwxr-xr-x  5 root root     4096 Oct 31 06:56 grub
+lrwxrwxrwx  1 root root       27 Oct 30 19:59 initrd.img -> initrd.img-7.0.0-42-generic
+-rw-------  1 root root 67675966 Oct 30 20:15 initrd.img-7.0.0-42-generic
+lrwxrwxrwx  1 root root       27 Oct 31 06:56 initrd.img.old -> initrd.img-7.0.0-42-generic
+drwx------  2 root root    16384 Oct 30 19:35 lost+found
+lrwxrwxrwx  1 root root       24 Oct 30 19:59 vmlinuz -> vmlinuz-7.0.0-42-generic
+-rw-------  1 root root 17344904 Oct 15 06:50 vmlinuz-7.0.0-42-generic
+lrwxrwxrwx  1 root root       24 Oct 31 06:56 vmlinuz.old -> vmlinuz-7.0.0-42-generic
+== ESP
+total 4568
+drwxr-xr-x 2 root root    4096 Oct 30 20:00 .
+drwxr-xr-x 4 root root    4096 Oct 30 20:00 ..
+-rwxr-xr-x 1 root root     108 Oct 30 20:00 BOOTX64.CSV
+-rwxr-xr-x 1 root root     112 Oct 30 20:00 grub.cfg
+-rwxr-xr-x 1 root root 2828168 Oct 30 20:00 grubx64.efi
+-rwxr-xr-x 1 root root  856280 Oct 30 20:00 mmx64.efi
+-rwxr-xr-x 1 root root  966768 Oct 30 20:00 shimx64.efi

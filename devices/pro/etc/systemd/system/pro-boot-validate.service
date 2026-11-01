@@ -1,0 +1,21 @@
+[Unit]
+Description=pro-boot: validate a trial boot, then promote it or roll it back
+Documentation=file:/usr/local/libexec/pro-boot-validate
+# Only on a trial's own boot. The condition is the kernel command line the trial entry carries, so
+# a normal boot never runs this and a hand-made boot cannot be mistaken for a trial.
+ConditionKernelCommandLine=pedalboot.profile=trial
+# The hook waits for sshd, a real network address and the engine itself, so it must start after the
+# things it waits for have at least been attempted. Not After=network-online.target: with no cable
+# in eno1 that can wait two minutes for nothing, and the hook does its own waiting.
+After=ssh.service pro-boot-settle.service namchaind.service
+
+[Service]
+Type=oneshot
+# The hook's own deadlines add up to about 210 s in the worst case (30 for sshd, 60 for an address,
+# 90 for the engine, 30 for its state). systemd's default 90 s would kill it mid-check, and a check
+# that is killed marks a good kernel bad — which happened on piv.
+TimeoutStartSec=400
+ExecStart=/usr/local/sbin/pro-boot validate
+
+[Install]
+WantedBy=multi-user.target pedal-maint.target

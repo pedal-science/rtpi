@@ -1,0 +1,111 @@
+#! /bin/sh
+set -e
+# 42_pedal — the pedal's own GRUB entries on pro. Run by grub-mkconfig (update-grub), after
+# 10_linux, so Ubuntu's entries stay above these and keep their ids.
+#
+# WHAT IT WRITES, from /var/lib/rtpi/pro-boot/:
+#   pedal-tuned   the pedal kernel with the isolation arguments      (promoted: kernel, args)
+#   pedal-loose   the same kernel, no isolation, no engine           (LOOSE_ARGS)
+#   pedal-trial   only while a trial is armed and still untested     (trial: kernel, args)
+#
+# pro-boot owns those files and runs update-grub after every change. Nothing here decides what
+# boots: that is grubenv's saved_entry (promotion) and next_entry (`grub-reboot`, the one-shot).
+#
+# FAIL-SAFE BY CONSTRUCTION. If the state is missing, unreadable or names a kernel that is not
+# installed, this emits nothing at all and says why on stderr. Ubuntu's own entries are untouched by
+# this file, so the worst case is a machine that boots stock — which is the fallback anyway.
+#
+# Installed by rtpi's scripts/deploy/harden-pro.sh. The reasons for each kernel argument are in
+# rtpi/devices/pro/device.env; the runtime half of the same tuning is pedal.project's
+# devices/pro/rootfs/etc/pedal/tune.conf.
+
+prefix="/usr"
+exec_prefix="/usr"
+datarootdir="/usr/share"
+: "${pkgdatadir:=${datarootdir}/grub}"
+. "$pkgdatadir/grub-mkconfig_lib"
+
+STATE_DIR=/var/lib/rtpi/pro-boot
+DEVICE_ENV=/etc/rtpi/device.env
+
+skip() { echo "42_pedal: $* — writing no pedal entries" >&2; exit 0; }
+
+[ -r "$DEVICE_ENV" ] || skip "no $DEVICE_ENV"
+# Only the words this script needs, and only as values: sourcing device.env would let it set
+# anything in this shell, and it is read by grub-mkconfig as root.
+value() { sed -n "s/^$1=//p" "$2" | tail -1 | sed 's/^"//; s/"$//'; }
+BASE_ARGS=$(value BASE_ARGS "$DEVICE_ENV")
+DRACUT_SAFETY_ARGS=$(value DRACUT_SAFETY_ARGS "$DEVICE_ENV")
+PANIC_ARGS=$(value PANIC_ARGS "$DEVICE_ENV")
+LOOSE_ARGS=$(value LOOSE_ARGS "$DEVICE_ENV")
+ENTRY_TUNED=$(value ENTRY_TUNED "$DEVICE_ENV")
+ENTRY_LOOSE=$(value ENTRY_LOOSE "$DEVICE_ENV")
+ENTRY_TRIAL=$(value ENTRY_TRIAL "$DEVICE_ENV")
+
+[ -r "$STATE_DIR/promoted" ] || skip "no $STATE_DIR/promoted (pro-boot has not been set up)"
+KERNEL=$(value kernel "$STATE_DIR/promoted")
+TUNED_ARGS=$(value args "$STATE_DIR/promoted")
+[ -n "$KERNEL" ] || skip "$STATE_DIR/promoted names no kernel"
+
+# Where the kernel and initramfs are, as GRUB will see them. On pro /boot is its own partition, so
+# this is "/" and the paths below are /vmlinuz-<release>; on a root-filesystem /boot it would be
+# /boot/vmlinuz-<release>, and this works either way.
+boot_rel_dirname=$(make_system_path_relative_to_its_root /boot)
+[ "$boot_rel_dirname" = "/" ] && boot_rel_dirname=""
+
+# The root filesystem, the way 10_linux chooses it: the device path when root is on LVM (a UUID
+# cannot be resolved before the volume group is assembled, and Ubuntu's own entry on this machine
+# says root=/dev/mapper/ubuntu--vg-ubuntu--lv), the UUID otherwise.
+if [ -n "${GRUB_DEVICE}" ] && uses_abstraction "${GRUB_DEVICE}" lvm 2>/dev/null; then
+  linux_root="root=${GRUB_DEVICE}"
+elif [ -n "${GRUB_DEVICE_UUID}" ]; then
+  linux_root="root=UUID=${GRUB_DEVICE_UUID}"
+elif [ -n "${GRUB_DEVICE}" ]; then
+  linux_root="root=${GRUB_DEVICE}"
+else
+  skip "grub-mkconfig named no root device"
+fi
+
+# How GRUB reaches the partition the kernel is on. Cached because both entries use it.
+prepare_boot_cache="$(prepare_grub_to_access_device "${GRUB_DEVICE_BOOT}" | grub_add_tab)"
+
+# pedal_entry <id> <title suffix> <release> <profile> <extra args>
+pedal_entry() {
+  id=$1 suffix=$2 release=$3 profile=$4 extra=$5
+  if [ ! -r "/boot/vmlinuz-$release" ] || [ ! -r "/boot/initrd.img-$release" ]; then
+    echo "42_pedal: /boot has no vmlinuz-$release or initrd.img-$release — skipping $id" >&2
+    return 0
+  fi
+  # pedalboot.profile is what the units and pro-boot read to know what kind of boot this is: the
+  # trial's validation, the settle check and the deadline all key off it, and `pro-boot status`
+  # reports it. pedalboot.entry says which entry the firmware actually chose, which is the one
+  # thing /proc/cmdline can tell you that nothing else can.
+  cat <<EOF
+menuentry 'Pedal — $suffix ($release)' --class ubuntu --class gnu-linux --class gnu --class os \$menuentry_id_option '$id' {
+	load_video
+	insmod gzio
+	if [ x\$grub_platform = xxen ]; then insmod xzio; insmod lzopio; fi
+$prepare_boot_cache
+	echo 'Loading the pedal kernel ($suffix): $release ...'
+	linux	$boot_rel_dirname/vmlinuz-$release $linux_root $BASE_ARGS $DRACUT_SAFETY_ARGS $PANIC_ARGS $extra pedalboot.profile=$profile pedalboot.entry=$id
+	initrd	$boot_rel_dirname/initrd.img-$release
+}
+EOF
+}
+
+# No `savedefault` in any of these, on purpose. With GRUB_DEFAULT=saved, savedefault would make
+# whatever just booted the new default — which would promote a trial simply for having started.
+# Promotion here is an explicit act: `pro-boot validate` passing, which writes saved_entry itself.
+
+pedal_entry "$ENTRY_TUNED" "tuned" "$KERNEL" "tuned" "$TUNED_ARGS"
+pedal_entry "$ENTRY_LOOSE" "loose" "$KERNEL" "loose" "$LOOSE_ARGS"
+
+# The trial, only while one is armed and untested. A trial marked bad leaves no entry behind: there
+# is then nothing for a stray `grub-reboot` or a hand-edited grubenv to boot into.
+if [ -r "$STATE_DIR/trial" ]; then
+  trial_state=$(value state "$STATE_DIR/trial")
+  if [ "$trial_state" = trying ]; then
+    pedal_entry "$ENTRY_TRIAL" "TRIAL, one boot" \
+      "$(value kernel "$STATE_DIR/trial")" "trial" "$(value args "$STATE_DIR/trial")"
+  fi
+fi

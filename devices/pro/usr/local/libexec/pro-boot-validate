@@ -1,0 +1,149 @@
+#!/bin/sh
+# pro-boot-validate <expected release> — decides whether a trial is promoted.
+#
+# Run by `pro-boot validate` on a trial's own boot (pedalboot.profile=trial on the kernel command
+# line, the trial marked trying). Exit 0 => it becomes what pro boots. Exit !0 => it is marked bad
+# and pro reboots to the current default.
+#
+# This is vip's hook (devices/vip/usr/local/libexec/vip-boot-validate), which is piv's before it,
+# with one check added: the engine. On vip a missing engine is not grounds for rollback, because
+# vip's kernel trial and its audio are separate concerns and pedal-guard covers the engine
+# separately. On pro there is no pedal-guard and no rescue root, so this hook is the only gate, and
+# a kernel that reaches the network but cannot play is not a kernel this pedal wants.
+#
+# Every check is a RETRY loop with a deadline, not a single look: a unit that is still starting is
+# not a unit that failed, and the surest way to roll back a good kernel is to ask too early.
+
+set -u
+expected=${1:?usage: pro-boot-validate <expected release>}
+
+log() { echo "pro-boot-validate: $*" >&2; }
+fail() { log "FAIL: $*"; exit 1; }
+
+# --- 1. sshd must be listening. Without this we lose the box. ----------------------
+i=0
+while [ "$i" -lt 30 ]; do
+    if ss -H -tln 2>/dev/null | grep -qE '(^|[^0-9.])[0-9.:*]*:22[[:space:]]'; then
+        break
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+[ "$i" -lt 30 ] || fail "sshd is not listening on port 22 after 30s"
+log "sshd is listening"
+
+# --- 2. At least one REAL interface must have a routable address. -----------------
+# Any physical interface, not a named one: eno1 has no cable on pro and wlp0s20f3 carries
+# everything, so a hook that insisted on either would roll back every good kernel. But "any
+# interface with a global address" is too weak — locally-created bridges have those whether or not
+# the machine can be reached — so the virtual ones are skipped.
+is_virtual() {
+    case "$1" in
+        lo|virbr*|docker*|br-*|veth*|vnet*|tun*|tap*|zt*|wg*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+i=0
+addr=""
+while [ "$i" -lt 60 ]; do
+    addr=$(ip -o -4 addr show scope global 2>/dev/null \
+           | while read -r _ ifname _ cidr _; do
+                 is_virtual "$ifname" || { echo "$ifname $cidr"; break; }
+             done)
+    [ -n "$addr" ] && break
+    i=$((i + 1))
+    sleep 1
+done
+if [ -z "$addr" ]; then
+    log "interfaces seen: $(ip -o -4 addr show scope global 2>/dev/null | awk '{print $2"="$4}' | tr '\n' ' ')"
+    fail "no PHYSICAL interface has a global IPv4 address after 60s (virtual bridges do not count)"
+fi
+log "network address present: $addr"
+
+# 60s rather than vip's 45: pro joins by WiFi through netplan's wpa_supplicant, and association
+# plus DHCP after a cold boot is slower than a Pi's. A default route is not strictly needed to
+# reach the box from the same subnet, so its absence is a warning worth seeing in the journal
+# rather than a rollback.
+route=$(ip -4 route show default 2>/dev/null | head -1)
+if [ -n "$route" ]; then
+    log "default route: $route"
+else
+    log "WARNING: no default IPv4 route (reachable on-subnet only)"
+fi
+
+# --- 3. The running kernel must be the one we meant to test. ----------------------
+# Guards against a mis-armed trial silently validating the kernel it was already running.
+running=$(uname -r)
+[ "$running" = "$expected" ] \
+    || fail "running kernel '$running' != expected '$expected'"
+log "kernel version matches: $running"
+
+# --- 4. If we expected a realtime kernel, it must actually BE realtime. -----------
+# /sys/kernel/realtime does not exist on mainline: it was an out-of-tree RT-patch artefact. The
+# version banner is the reliable test, and Ubuntu's own realtime flavour sets it.
+case "$expected" in *realtime*|*-rt*)
+    uname -v | grep -q 'PREEMPT_RT' \
+        || fail "expected a PREEMPT_RT kernel but uname -v is: $(uname -v)"
+    log "PREEMPT_RT confirmed active"
+    ;;
+esac
+
+# --- 5. The isolation the trial asked for must be in force. -----------------------
+# A trial whose whole point is isolcpus is not a success if the kernel ignored the argument — which
+# is exactly what happens when a release is built without CONFIG_CPU_ISOLATION or the argument is
+# misspelled. Checked only when the command line asked for it, so a plain kernel trial still passes.
+want_isol=$(sed -n 's/.*isolcpus=\([^ ]*\).*/\1/p' /proc/cmdline)
+if [ -n "$want_isol" ]; then
+    # isolcpus takes optional flag words before the list ("managed_irq,domain,1-5").
+    want_cpus=${want_isol##*,}
+    got_cpus=$(cat /sys/devices/system/cpu/isolated 2>/dev/null)
+    [ "$got_cpus" = "$want_cpus" ] \
+        || fail "isolcpus asked for '$want_cpus' but /sys says '$got_cpus'"
+    log "isolated cpus: $got_cpus"
+fi
+
+# --- 6. The engine. ---------------------------------------------------------------
+# Only where it is enabled: a machine that has not had pedal.project's devices/pro applied yet has
+# no namchaind to wait for, and that is a legitimate state to try a kernel in.
+if systemctl is-enabled namchaind.service >/dev/null 2>&1; then
+    i=0
+    while [ "$i" -lt 90 ]; do
+        if [ "$(systemctl is-active namchaind.service 2>/dev/null)" = active ]; then
+            break
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    [ "$i" -lt 90 ] || fail "namchaind did not become active within 90s: $(systemctl is-active namchaind.service 2>/dev/null) ($(systemctl show -p Result --value namchaind.service 2>/dev/null))"
+    # Active is not the same as playing. The engine reports its own state, and "running" is the
+    # only one that means it has the device open and is rendering blocks.
+    #
+    # Parsed as JSON, not with a regex. The first version of this check used
+    # `sed -n 's/.*"state":"\([a-z]*\)".*/\1/p'`, and `.*` is greedy, so on a one-line status
+    # document it matched the LAST "state" in the whole thing — a warm-set document's, which reads
+    # "audible". That rolled back a perfectly good realtime kernel on 2026-11-01, with every real
+    # check above it having passed. There are four "state" keys in that document; only one of them
+    # is the engine's.
+    if [ -x /opt/namchain/current/bin/namchainctl ] && command -v python3 >/dev/null 2>&1; then
+        i=0
+        state=""
+        while [ "$i" -lt 30 ]; do
+            state=$(/opt/namchain/current/bin/namchainctl --compact status 2>/dev/null \
+                    | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"]["state"])' \
+                      2>/dev/null) || state=""
+            [ "$state" = running ] && break
+            i=$((i + 1))
+            sleep 1
+        done
+        [ "$state" = running ] || fail "namchaind is active but its state is '${state:-unreadable}', not running"
+        log "namchaind is running"
+    else
+        log "namchaind is active (namchainctl or python3 is missing, so its state was not read)"
+    fi
+else
+    log "namchaind is not enabled here; not waiting for it"
+fi
+
+log "all checks passed — promoting the trial"
+exit 0

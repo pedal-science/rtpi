@@ -1,0 +1,2 @@
+sudo: 'pro-boot': command not found
+pro-boot is not installed yet
