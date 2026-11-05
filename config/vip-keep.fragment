@@ -24,10 +24,11 @@ CONFIG_INET_DIAG=m
 CONFIG_INET_TCP_DIAG=m
 CONFIG_INET_MPTCP_DIAG=m
 # vc4, v3d — the pedal's screen (pedal.project D14: rigpa on the Core host). vc4 is the display
-# controller and HDMI (KMS, what Qt's eglfs_kms drives), v3d the GPU Mesa renders with. Nothing
-# loads them until config-pedal.txt carries dtoverlay=vc4-kms-v3d, so the trim can never see them:
-# the same self-fulfilling absence as cdc_acm. Their helpers (KMS, GEM, the HDMI audio codec) are
-# selected by these two and need no line of their own.
+# controller and HDMI/DSI (KMS, what Qt's eglfs_kms drives), v3d the GPU Mesa renders with. Nothing
+# loads them until a slot carries dtoverlay=vc4-kms-v3d (promoted by vip-boot try-config on
+# 2026-10-10; a card's config-pedal.txt records the same line once a screen is chosen), so the
+# trim can never see them: the same self-fulfilling absence as cdc_acm. Their helpers (KMS, GEM,
+# the HDMI audio codec) are selected by these two and need no line of their own.
 CONFIG_DRM_VC4=m
 CONFIG_DRM_V3D=m
 # i2c-brcmstb, backlight and HDMI CEC — what vc4 needs to finish binding on the Pi 5, found by booting
@@ -37,11 +38,23 @@ CONFIG_DRM_V3D=m
 CONFIG_I2C_BRCMSTB=m
 CONFIG_BACKLIGHT_CLASS_DEVICE=m
 CONFIG_DRM_VC4_HDMI_CEC=y
-# usbhid, hid-generic, hid-multitouch — the screen's touch digitiser, on USB. Nothing HID is
-# attached to vip today, so these too are absent from /proc/modules until the screen is.
+# usbhid, hid-generic, hid-multitouch — the 8.8″ bar's touch digitiser, on USB. Nothing HID is
+# attached to vip today, so these too are absent from /proc/modules until that screen is.
 CONFIG_USB_HID=m
 CONFIG_HID_GENERIC=m
 CONFIG_HID_MULTITOUCH=m
+# Waveshare 4.3″ DSI QLED (800×480): vc4-kms-dsi-waveshare-800x480. The panel binds as panel-dsi
+# (panel_simple), the microcontroller at I2C 0x45 is the Pi 7″ regulator (power, backlight, touch
+# reset), and the capacitive controller at 0x38 is edt-ft5506. drm_rp1_dsi is the RP1 DSI host
+# (compatible raspberrypi,rp1dsi) that publishes the MIPI-DSI bus and the DRM connector — without
+# it the three below bind (backlight, touch) and the screen still has no DSI connector. The overlay
+# is already in the boot slots; without these the line promotes and the screen stays dark. Same
+# self-fulfilling absence as the USB HID lines: the trim never saw them because the panel was not
+# attached then.
+CONFIG_DRM_RP1_DSI=m
+CONFIG_DRM_PANEL_SIMPLE=m
+CONFIG_REGULATOR_RASPBERRYPI_TOUCHSCREEN_ATTINY=m
+CONFIG_TOUCHSCREEN_EDT_FT5X06=m
 #
 # Note on ac97_bus and snd_compress: the board loads both, but only as dependency edges out
 # of snd-soc-core (its selectors, SND_SOC_AC97_BUS and SND_SOC_COMPRESS, were on because of
